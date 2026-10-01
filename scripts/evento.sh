@@ -9,12 +9,14 @@
 source "$(dirname "$0")/comum.sh" 2>/dev/null || exit 0
 tipo="$1"; IP=$(le_config CLAUDINHO_IP); TOKEN=$(le_config CLAUDINHO_TOKEN)
 [ -n "$tipo" ] && [ -n "$IP" ] && [ -n "$TOKEN" ] || { cat >/dev/null 2>&1; exit 0; }
+PYTHON=python3
+[ "$(ambiente)" = windows ] && PYTHON=python
 
 # stdin: JSON do evento. session_id vira um hash curto (o id real nao sai do
 # PC); no prompt, o texto so serve para escolher o humor e nao e enviado.
 # Na ferramenta vai so a categoria (codando, terminal, lendo, agente, web),
 # para a cena na tela: nome de arquivo e comando nunca saem do PC.
-leitura=$(python3 -c 'import sys,json,hashlib
+leitura=$("$PYTHON" -c 'import sys,json,hashlib
 try: d=json.load(sys.stdin)
 except Exception: d={}
 print(hashlib.sha1((d.get("session_id") or "").encode()).hexdigest()[:8])
@@ -34,5 +36,5 @@ fi
 # tipo, humor, acao e sessao sao palavras fixas ou hexadecimal: nao precisam de escape.
 # Segredo e corpo vao pela entrada padrao do curl (-K -), fora da linha de comando.
 { printf 'header = "Authorization: Bearer %s"\nheader = "Content-Type: application/json"\ndata = "{\\"tipo\\":\\"%s\\",\\"humor\\":\\"%s\\",\\"acao\\":\\"%s\\",\\"sessao\\":\\"%s\\"}"\n' \
-    "$TOKEN" "$tipo" "$humor" "$acao" "$sessao" | curl -s -m 2 -o /dev/null -X POST "http://$IP/evento" -K - ; } >/dev/null 2>&1 &
+    "$TOKEN" "$tipo" "$humor" "$acao" "$sessao" | curl -s -m 10 -o /dev/null -X POST "http://$IP/evento" -K - ; } >/dev/null 2>&1 &
 exit 0

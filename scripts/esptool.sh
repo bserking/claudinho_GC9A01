@@ -12,7 +12,7 @@ case "$AMB" in
   wsl|windows) ALVO=windows-amd64; EXE=esptool.exe ;;
   linux) case "$(uname -m)" in aarch64|arm64) ALVO=linux-aarch64 ;; armv7*) ALVO=linux-armv7 ;; *) ALVO=linux-amd64 ;; esac; EXE=esptool ;;
   mac) case "$(uname -m)" in arm64) ALVO=macos-arm64 ;; *) ALVO=macos-amd64 ;; esac; EXE=esptool ;;
-  *) echo "ambiente nao suportado" >&2; exit 1 ;;
+  *) echo "unsupported environment" >&2; exit 1 ;;
 esac
 # SHA-256 oficiais dos pacotes da versao fixada (API de releases do GitHub).
 # O download so e usado se bater com isto; mudou a versao, atualize a lista.
@@ -28,13 +28,13 @@ DIR="$DADOS/esptool-$ESPTOOL_VERSAO-$ALVO"
 BIN=$(find "$DIR" -name "$EXE" -type f 2>/dev/null | head -1)
 [ -f "$DIR/.verificado" ] || BIN=""          # cache de antes da verificacao: baixa de novo
 if [ -z "$BIN" ]; then
-  echo "baixando esptool $ESPTOOL_VERSAO ($ALVO)..." >&2
+  echo "downloading esptool $ESPTOOL_VERSAO ($ALVO)..." >&2
   rm -rf "$DIR"; mkdir -p "$DIR"
   URL="https://github.com/espressif/esptool/releases/download/$ESPTOOL_VERSAO/esptool-$ESPTOOL_VERSAO-$ALVO"
   if [ "$ALVO" = windows-amd64 ]; then PACOTE="$DIR/e.zip"; URL="$URL.zip"; else PACOTE="$DIR/e.tar.gz"; URL="$URL.tar.gz"; fi
-  curl -fsSL -o "$PACOTE" "$URL" || { echo "falha ao baixar o esptool" >&2; exit 1; }
+  curl -fsSL -o "$PACOTE" "$URL" || { echo "esptool download failed" >&2; exit 1; }
   if [ "$(sha256_de "$PACOTE")" != "$SHA" ]; then
-    rm -rf "$DIR"; echo "esptool baixado nao confere com o SHA-256 oficial; nada foi executado" >&2; exit 1
+    rm -rf "$DIR"; echo "downloaded esptool does not match the official SHA-256; nothing was executed" >&2; exit 1
   fi
   if [ "$ALVO" = windows-amd64 ]; then
     (cd "$DIR" && { unzip -q e.zip 2>/dev/null || python3 -c 'import zipfile;zipfile.ZipFile("e.zip").extractall(".")'; })

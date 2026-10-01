@@ -1,0 +1,2 @@
+22ec21627e1a129d1192f1b739bbe4479b2a871b5b2b0ad2d4010360ebd73902  claudinho-esp32c3-1.8.3-gc9a01.4-completo.bin
+6ef8ea1c29937b2db1a22b3a781694535ac307a7f53e0daaec0350820ec24d70  claudinho-esp32c3-1.8.3-gc9a01.4-ota.bin

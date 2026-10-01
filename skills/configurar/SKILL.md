@@ -1,331 +1,246 @@
 ---
 name: configurar
-description: Configura o Claudinho (mascote do Claude Code em ESP32 + display Nextion) do zero ou depois de trocar de rede - acha a placa no USB, grava o firmware, configura o Wi-Fi, grava a tela do Nextion, liga a status line e testa. Use também para diagnosticar quando o Claudinho não reage, para atualizar o firmware e para ligar uma impressora 3D Bambu Lab (painel e alertas da impressão).
+description: "Configure Claudinho for ESP32-C3 Super Mini and the round GC9A01 SPI display: firmware, Wi-Fi, Claude Code status line, diagnostics, OTA updates, and optional Bambu Lab monitoring."
 ---
 
-# Configurar o Claudinho
+# Configure Claudinho
 
-Você vai conduzir a pessoa pela configuração, rodando os scripts do plugin. Fale
-em linguagem simples, um passo por vez, e diga o que está fazendo antes de cada
-comando. **Nunca peça a senha do Wi-Fi no chat:** ela é digitada pela pessoa
-num terminal, escondida, pelo `wifi.sh` (passo 4), e não passa pela conversa.
-O mesmo vale para o **código de acesso da impressora Bambu** (seção própria):
-digitado escondido pela pessoa, gravado só na placa.
+This package targets **ESP32-C3 Super Mini + GC9A01 240x240 SPI**. The ESP32
+draws the interface directly; no separate display upload is needed.
 
-Em **todo** comando, use estas variáveis (já resolvidas pelo Claude Code):
+| GC9A01 | ESP32-C3 Super Mini |
+| --- | --- |
+| VDD | 3.3V |
+| GND | GND |
+| SCL/SCK | GPIO 4 |
+| SDA/MOSI | GPIO 5 |
+| CS | GPIO 6 |
+| DC | GPIO 7 |
+| RST | GPIO 10 |
+
+There is no touch controller or MISO wire in this setup. **BOOT** approves an
+update, acknowledges an alert, and cycles face → usage → printer (if configured)
+→ face. The display asks **Press BOOT** when approval is required. Touch-only
+games and the visual color palette are disabled. Set an exact face color with
+`claudinho.sh cor R G B salvar`.
+
+Guide the user through one step at a time. Explain each command before running
+it and inspect its output before continuing. Never claim success without the
+corresponding acknowledgement. A successful build does not prove that the
+display wiring or a newly connected board works.
+
+**Never ask for the Wi-Fi password or Bambu printer access code in the chat.**
+The user enters these privately in a terminal. Respect restrictions on the
+computer: use existing tools and do not install packages, change system
+settings, or request administrator access. If an upload tool is unavailable,
+explain the prerequisite before proceeding. The `esptool.sh` download fallback
+must not be used when downloading programs is prohibited.
+
+For every command, use the variables provided by Claude Code:
 
 ```bash
 export R="${CLAUDE_PLUGIN_ROOT}"; export CLAUDINHO_DADOS="${CLAUDE_PLUGIN_DATA}"
 ```
 
-Os scripts funcionam em Linux, macOS, WSL e Windows (Git Bash). No WSL e no
-Windows a porta USB é do Windows (ex.: `COM6`) e o `esptool.exe` é usado
-automaticamente. `bash "$R/scripts/comum.sh"` não imprime nada; para saber o
-ambiente: `bash -c 'source "$R/scripts/comum.sh"; ambiente'`.
+Scripts support Linux, macOS, WSL, and Windows with Git Bash. Under WSL and
+Windows, USB ports belong to Windows, for example `COM6`. To inspect the
+environment:
 
-## Antes de tudo: o ambiente foi testado?
+```bash
+bash -c 'source "$R/scripts/comum.sh"; ambiente'
+```
 
-Confira o ambiente (`ambiente` do `comum.sh`) e a placa contra esta lista.
+The ESP32-C3 firmware has been built and the connected GC9A01 has been used in
+this project. Other boards, wiring, and operating systems still need their own
+hardware test. If a command fails, inspect the cause instead of repeating it
+blindly. Ask the user to handle physical actions such as connecting a data
+cable or pressing BOOT.
 
-**Testado de ponta a ponta (tudo funciona):**
-- WSL2 no Windows 11, ESP32-C3 Super Mini, Nextion NX3224F024_011.
+## Update process
 
-**Escrito para funcionar, mas ainda sem teste real:**
-- Linux nativo, macOS (Intel e Apple), Windows com Git Bash.
-- ESP32-S3 DevKitC-1 (o firmware compila, o fluxo é o mesmo).
-- Qualquer outro modelo de Nextion (a tela incluída é só para o NX3224F024).
+- A new or unconfigured board needs its first firmware upload over USB.
+- Later updates use `claudinho.sh atualizar`, which posts the firmware directly
+  to the board over the local network. There is no cloud server in this path.
+- Tell the user before starting: **Press BOOT** on the board when prompted.
+  Approval expires after about one minute. No upload starts without approval.
+- The ESP32 writes to its spare partition and switches only after verification.
+  An interrupted transfer keeps the old firmware active.
+- If Wi-Fi is unavailable, the IP changed, the device secret differs, or the
+  board no longer runs compatible firmware, use USB setup and diagnostics.
 
-Se o ambiente ou a placa **não estiver na lista testada**, diga isso à pessoa
-**antes do passo 1**, em uma frase, e combine o jeito de trabalhar:
-
-1. Rode um passo por vez e **confira a saída** antes do próximo (não confie no
-   código de saída sozinho): porta encontrada, `Hash of data verified`,
-   `CFG OK`, `"wifi":"conectado"`, `ok, reiniciando`.
-2. Se um script falhar, **não repita às cegas**. Leia o erro, descubra a causa
-   no ambiente dela (nome da porta, permissão, ferramenta faltando, `stty`
-   diferente, PowerShell ausente) e proponha a correção. Se precisar, escreva
-   uma versão ajustada do script para o caso dela e explique o que mudou.
-3. Peça à pessoa para agir só no que exige mãos (trocar cabo, apertar BOOT,
-   dar permissão, instalar algo com senha de administrador).
-4. Ao final, sugira que ela conte o que precisou mudar (issue no repositório),
-   para o ambiente entrar na lista de testados.
-
-Nunca afirme que algo funcionou sem ter visto a confirmação correspondente.
-
-## Como funcionam as atualizações
-
-- **Primeira gravação: sempre pelo USB** (passo 3). A placa nova não tem Wi-Fi
-  configurado nem o servidor HTTP do Claudinho.
-- **Depois: pela rede (OTA),** com `claudinho.sh atualizar`. O PC envia o
-  firmware por HTTP direto para a placa (`POST /ota`, com o segredo). Nada de
-  servidor ou nuvem. Leva ~20 s e a placa reinicia sozinha.
-- **Precisa de alguém na frente do Claudinho** (firmware 1.0.9 em diante): o
-  script pede, a tela mostra "Toque na tela para permitir" e a pessoa tem
-  1 minuto para tocar (ou apertar BOOT na placa). **Avise antes de rodar**
-  `atualizar` ou `tela`. Sem o toque nada é enviado. Isso impede que alguém
-  que descubra o segredo na rede grave outro firmware de longe.
-- **É seguro:** o ESP32 grava o firmware novo na partição reserva e só troca
-  se a gravação terminar e for validada. Se a rede cair no meio, continua
-  rodando o firmware antigo; basta repetir.
-- **A tela do Nextion também vai pela rede** (`claudinho.sh tela`), passando
-  pelo ESP32. Se falhar no meio aparece "System Data Error": repita, não estraga.
-- **Quando o OTA não é possível:** placa fora da rede, IP mudou (rode esta skill
-  de novo para achar o IP pelo USB), segredo diferente (reconfigure pelo passo
-  4), ou firmware anterior a 1.0.0 (grave pelo USB). Nesses casos, volte ao USB.
-- Firmware de outra fonte pode tirar o OTA; se a pessoa gravar outro programa
-  na placa, a volta é sempre pelo USB (passo 3).
-
-## Pasta do projeto: LittleClaude
-
-A configuração deve ser feita numa pasta só dela, chamada **LittleClaude**
-(ex.: `~/LittleClaude` no Linux/macOS/WSL, `C:\Users\<nome>\LittleClaude` no
-Windows). Assim o que for feito para o Claudinho (arquivos, anotações, testes)
-fica junto e não se mistura com outros projetos.
-
-Se o diretório de trabalho desta sessão não se chamar `LittleClaude`, antes do
-passo 0 oriente a pessoa, em poucas palavras, a criar a pasta, sair do Claude
-Code e abri-lo de novo dentro dela (`mkdir ~/LittleClaude && cd ~/LittleClaude && claude`),
-e então pedir a configuração de novo. Se ela preferir seguir onde está, siga;
-não é obrigatório.
-
-## 0. Já está configurado?
+## 0. Check whether it is configured
 
 ```bash
 bash "$R/scripts/claudinho.sh" info
 ```
 
-Se responder um JSON com `"versao"`, o Claudinho está na rede: pule para o que a
-pessoa pediu (diagnóstico → passo 7; atualizar → `claudinho.sh atualizar`;
-trocar tela → passo 5). Se disser "ainda não configurado" ou não responder, siga
-do passo 1.
+A JSON reply containing `"versao"` confirms that the device is reachable.
+Continue with the user's request: diagnostics in step 7 or an OTA update with
+`claudinho.sh atualizar`. If it reports that the device is not configured or
+does not respond, continue with step 1.
 
-## 1. Hardware
+## 1. Connect the hardware
 
-Confirme com a pessoa (mostre a tabela se ela ainda não montou):
+Confirm the wiring table above. **VDD connects to 3.3 V.** Power the assembly
+through the ESP32 USB connector, with the display supplied by the board.
+Use a **USB data cable**; a charging-only cable cannot configure the board.
 
-| Fio do Nextion | ESP32-C3 Super Mini | ESP32-S3 DevKitC-1 |
-|---|---|---|
-| vermelho 5V | 5V | 5V |
-| preto GND | GND | GND |
-| azul TX | pino RX (GPIO 20) | GPIO 18 |
-| amarelo RX | pino TX (GPIO 21) | GPIO 17 |
+If an OTA update returns an empty response, check Wi-Fi signal and power using
+`claudinho.sh log`. An incomplete transfer is discarded. Investigate repeated
+failures; `claudinho.sh reiniciar` reconnects the board to Wi-Fi.
 
-Peça para ligar o ESP32 no computador com um **cabo USB de dados** (cabo só de
-carga não funciona).
-
-**Fonte depois de montado:** ESP32 e Nextion juntos pedem uma fonte de 5 V de
-**pelo menos 1 A**; fonte fraca pode derrubar o Wi-Fi nos picos de consumo.
-Nunca ligar a fonte e o USB do PC ao mesmo tempo.
-Se `atualizar` ou `tela` falhar com resposta vazia: é Wi-Fi perdendo pacotes.
-Não estraga nada (a placa descarta o envio incompleto). Olhe o sinal no
-`claudinho.sh log` (linha `wifi:`), confira a fonte, e repita; se continuar,
-`claudinho.sh reiniciar` e tente de novo (a placa reconecta ao Wi-Fi).
-
-## 2. Achar a placa
+## 2. Find the USB port
 
 ```bash
 bash "$R/scripts/porta.sh"
 ```
 
-Guarde a porta impressa (ex.: `COM6`, `/dev/ttyACM0`, `/dev/cu.usbmodem101`).
-Se falhar: trocar o cabo; segurar o botão **BOOT** enquanto pluga o USB e tentar
-de novo; no Linux, se der permissão negada, `sudo usermod -aG dialout $USER` e
-sair/entrar da sessão.
+Keep the printed port, such as `COM6`, `/dev/ttyACM0`, or `/dev/cu.usbmodem101`.
+If detection fails, check the cable and try connecting USB while holding
+**BOOT**. If access is blocked by the computer's permissions, explain that
+limitation; do not change administrator or system permissions.
 
-## 3. Gravar o firmware (~30 s)
+## 3. Upload firmware over USB
 
-```bash
-bash "$R/scripts/gravar.sh" PORTA
-```
-
-Se sair `PRECISA_BOOT`, é o caso mais comum com placa que já tinha outro
-programa (visto em teste real): peça para **segurar BOOT, tirar e pôr o USB,
-soltar BOOT**, e rode de novo. A porta pode mudar de número; rode o passo 2 de novo.
-
-Espere ver `Hash of data verified`. Isso apaga qualquer configuração anterior da
-placa. O display vai mostrar "Olá! Sou o Claudinho." (ou lixo, se o Nextion ainda
-tiver a tela de fábrica — normal, o passo 5 resolve).
-
-## 4. Wi-Fi e segredo
-
-Liste as redes que a placa enxerga (só 2,4 GHz):
+Run this only when firmware upload is needed and existing upload tooling is
+available:
 
 ```bash
-bash "$R/scripts/serial.sh" PORTA SCAN REDE "SCAN FIM" 40
+bash "$R/scripts/gravar.sh" PORT
 ```
 
-Pergunte **só o nome** da rede. A senha a pessoa digita ela mesma, num
-terminal, sem aparecer: assim ela não passa pela conversa e fica gravada
-**só na placa**. Monte o comando com o caminho real (resolva `$R` e
-`$CLAUDINHO_DADOS` antes de mostrar) e peça para a pessoa abrir um terminal
-**fora do Claude Code** (no Windows, o mesmo tipo de terminal em que o Claude
-Code roda: WSL ou Git Bash) e rodar:
+Replace `PORT` with the detected port. If the output contains `PRECISA_BOOT`,
+ask the user to **hold BOOT, unplug and reconnect USB, then release BOOT**.
+Detect the port again if its number changes, then retry.
+
+Wait for `Hash of data verified`. The full USB upload may erase the board's
+previous configuration. Ask what appears on the display. If it stays black or
+white, stop and check power, SCL/SCK, SDA/MOSI, CS, DC, and RST.
+
+## 4. Configure Wi-Fi and the device secret
+
+List visible networks; the ESP32 uses 2.4 GHz:
 
 ```bash
-CLAUDINHO_DADOS="<dados>" bash "<R>/scripts/wifi.sh" PORTA "NOME DA REDE"
+bash "$R/scripts/serial.sh" PORT SCAN REDE "SCAN FIM" 40
 ```
 
-O script pede a senha escondida, gera o segredo do PC, envia pela USB, espera
-a placa entrar no Wi-Fi e grava IP, segredo e MAC no computador. Ele termina
-com `Pronto!`, o IP e o MAC; peça para a pessoa avisar quando aparecer (ou
-colar o erro). Se disser que não entrou no Wi-Fi: senha errada ou rede de
-5 GHz, e é só rodar de novo. Confira do seu lado com
-`bash "$R/scripts/claudinho.sh" info`.
-
-Se a pessoa não tiver como abrir outro terminal e **fizer questão** de passar
-a senha pelo chat, avise uma vez que ela ficará registrada na conversa, e só
-então rode você mesmo, passando a senha pela entrada padrão:
-`printf '%s\n' 'SENHA' | bash "$R/scripts/wifi.sh" PORTA "NOME DA REDE"`.
-
-**Diga à pessoa o MAC e o IP** e recomende reservar esse IP no roteador (DHCP
-estático); se o IP mudar, o Claudinho para de reagir até rodar esta skill de novo.
-
-## 5. Tela do Nextion (~40 s, pela rede)
-
-O plugin traz a tela pronta para o NX3224F024 (Discovery 2,4"). A imagem
-é feita para a tela girada 270, que é a única montagem possível: a área útil
-do Nextion não fica no centro da placa, e só nessa posição ela fica
-centralizada na caixa. Não existe versão para outra orientação.
-
-Avise que vai pedir um toque na tela e rode:
+Ask only for the **network name**. Resolve `$R` and `$CLAUDINHO_DADOS` to actual
+paths before showing the command. Ask the user to run it in a terminal
+**outside Claude Code**, using Git Bash or WSL on Windows:
 
 ```bash
-bash "$R/scripts/claudinho.sh" tela
+CLAUDINHO_DADOS="<data-directory>" bash "<plugin-root>/scripts/wifi.sh" PORT "NETWORK NAME"
 ```
 
-A tela mostra "Toque na tela para permitir"; depois do toque, responde
-`ok, reiniciando`. Se o Nextion mostrar "System Data Error", repita o
-comando (é upload incompleto, não estraga nada). Tela branca depois: 
-`claudinho.sh reiniciar`.
+The script asks for a hidden password, generates the local device secret,
+sends configuration over USB, and stores the device IP, secret, and MAC on the
+computer. The Wi-Fi password stays on the board. Wait for **Done!**, the IP,
+and the MAC. If it fails, ask for the error message without any password or
+secret. Check the password locally and ensure the network is 2.4 GHz.
 
-## 6. Status line
-
-Os hooks do plugin já estão ativos. A status line (que manda o uso do plano) o
-plugin não pode ligar sozinho; este script liga, com backup, e preserva uma
-status line que a pessoa já tenha:
+Verify from Claude Code:
 
 ```bash
-python3 "$R/scripts/instalar-statusline.py" "$CLAUDINHO_DADOS"
+bash "$R/scripts/claudinho.sh" info
 ```
 
-## 7. Testar
+USB acknowledgements and machine-readable fields retain their existing names:
+`CFG OK`, `"wifi":"conectado"`, and `"manut":"liberada"`. These protocol
+values are intentional even though user-facing messages are English.
+
+Tell the user the IP and MAC and recommend a DHCP reservation on the router.
+If the IP changes, the stored configuration must be updated.
+
+## 5. Check the display
+
+The GC9A01 interface is included in the ESP32 firmware. After the greeting or
+face appears, continue to the status line. No additional screen file is needed.
+
+## 6. Enable the Claude Code status line
+
+Plugin hooks report work events. The status line also sends the usage numbers
+provided by Claude Code. The setup script backs up settings and preserves an
+existing status line:
+
+```bash
+python "$R/scripts/instalar-statusline.py" "$CLAUDINHO_DADOS"
+```
+
+Use the existing Python executable; on Linux or macOS it may be `python3`.
+No Python package installation is needed. This integrates Claude Code usage;
+the separate Claude App skill reports task states and does not measure plan
+limits.
+
+## 7. Test and diagnose
 
 ```bash
 bash "$R/scripts/claudinho.sh" cara prompt feliz
 bash "$R/scripts/claudinho.sh" info
 ```
 
-Pergunte se o Claudinho fez `> <` (olhos apertados de alegria). O `info` deve
-mostrar `"local":true` e os números do plano depois da próxima resposta.
-Para diagnóstico sem cabo: `claudinho.sh log`.
+Ask whether the happy face with narrowed eyes appeared. `info` should show
+`"local":true`. Usage values arrive after Claude Code supplies its next status
+line update. Read diagnostics without USB using `claudinho.sh log`.
 
-## Mudar a cor do rosto
+## Optional Bambu Lab printer
 
-Quando a pessoa quiser trocar a cor (por exemplo, para combinar com o filamento),
-rode `bash "$R/scripts/claudinho.sh" cor` e explique o que vai aparecer na tela:
-6 cores base; tocando numa, 12 tons dela numa moldura em volta da tela, com o
-tom tocado grande no centro. Com a tela montada, os tons da borda ficam colados
-na moldura impressa da caixa: diga que dá para comparar cada um direto com o
-filamento, lado a lado;
-tocando no centro, uma prévia do rosto com **Gravar**, **Voltar** (à moldura) ou
-**Cancelar** (volta à cor de antes). 1 minuto sem toque cancela. A cor gravada continua depois de reiniciar. Os olhos ficam
-sempre pretos. Quem souber a cor exata: `claudinho.sh cor R G B salvar`.
+Use this section only when the user asks to connect a printer. The original
+integration was tested on a P2S with AMS. Other Bambu models with local network
+access need their own test; do not claim compatibility was verified.
 
-## Jogo da velha
+The device connects directly to the printer on the local network. Its dashboard
+shows progress, time remaining, layers, temperatures, and AMS information.
+During printing it appears periodically. Press **BOOT** to cycle screens or
+acknowledge an alert. Informational alerts clear automatically; action alerts
+remain until acknowledged. Preview an alert using
+`claudinho.sh alerta bom|ruim|filamento|hms`.
 
-Quando a pessoa quiser jogar ("vamos jogar velha", "quero jogar com o
-Claudinho"), rode `bash "$R/scripts/claudinho.sh" velha`. É um passatempo que
-roda inteiro na placa: quem joga contra a pessoa é o próprio ESP32, sem gastar
-token. Explique em uma frase: ela é o X, toca nos quadrados; no fim o Claudinho
-reage (triste se ela ganhar, empolgado se ele ganhar) e começa outra partida
-sozinho; para sair, 3 toques rápidos no mesmo quadrado (ou 2 minutos sem tocar).
-
-## Genius
-
-Quando a pessoa quiser jogar Genius (ou "o jogo das cores", "Simon"), rode
-`bash "$R/scripts/claudinho.sh" genius`. Também roda inteiro na placa, sem
-token. Explique em uma frase: o Claudinho acende uma sequência de cores e ela
-repete tocando; a cada acerto a sequência cresce uma cor; errou, ele mostra o
-placar e começa de novo; para sair, 3 toques rápidos no mesmo quadrante (ou 2
-minutos sem tocar).
-
-## Impressora Bambu Lab (opcional)
-
-Quando a pessoa disser que tem uma impressora Bambu ("tenho uma Bambu", "liga
-minha impressora no Claudinho"). **Testado na P2S** (com AMS). Outros modelos
-Bambu que aceitam conexão local (X1, P1, A1) devem funcionar, mas ainda não
-foram testados: diga isso à pessoa.
-
-O Claudinho conecta direto na impressora, pela rede local (sem nuvem, sem
-servidor, sem token). Ele mostra:
-
-- um **painel** (modelo e estado, umidade e temperatura do AMS, 3 colunas:
-  %, tempo restante e camada; barra na cor do filamento, temperaturas do bico,
-  da mesa e da câmara, as 4 cores do AMS com a atual em destaque). Imprimindo, aparece
-  sozinho a cada 5 minutos por 15 s. No cartão de consumo e no painel há
-  botões embaixo: **Tokens** | **Impressora** | **Manter** (a tela fica
-  ligada; o botão vira **Dormir**, que volta ao rosto). Bom para usar o
-  Claudinho como monitor portátil da impressora. O nome da impressão não
-  aparece: pela rede local só vem "projeto + placa" ou o perfil do MakerWorld;
-- **alertas** que **ficam na tela até um toque** (o toque quer dizer "li"):
-  começou, pausou (com o motivo: acabou o filamento, bico entupido, erro na
-  1ª camada...), retomou, faltam 5 min, trocou o filamento, terminou (com a
-  duração), falhou/cancelada, avisos HMS da impressora e AMS úmido (≥ 50 %).
-  Em jogo, paleta ou atualização, os alertas esperam a volta ao rosto.
-  Os avisos HMS aparecem em português (categoria + frase curta + código
-  pequeno), com a lista oficial da Bambu embutida; os **informativos** (sem
-  internet, relógio, câmera ao vivo...) saem sozinhos em 20 s e não se
-  repetem por 30 min. `claudinho.sh alerta bom|ruim|filamento|hms` mostra um
-  exemplo.
-
-Passos:
-
-1. **Na impressora**, em Configurações > Rede (WLAN), anote o **IP** e o
-   **código de acesso** (8 caracteres). Se a conexão for recusada, ligue o
-   modo LAN (e o modo desenvolvedor, conforme o firmware da impressora).
-   Recomende reservar o IP da impressora no roteador.
-2. **O código de acesso é um segredo, como a senha do Wi-Fi: nunca peça no
-   chat.** Monte o comando com o caminho real (resolva `$R` e
-   `$CLAUDINHO_DADOS`) e peça para a pessoa rodar num terminal **fora do
-   Claude Code**:
+1. On the printer, open Settings → Network/WLAN and note the **IP** and
+   **access code**. Recommend reserving its IP on the router. Local access may
+   require the printer's LAN or developer mode, depending on its firmware.
+2. Ask the user to enter the access code privately in a terminal outside
+   Claude Code. Resolve the directory paths in this command first:
 
    ```bash
-   CLAUDINHO_DADOS="<dados>" bash "<R>/scripts/claudinho.sh" bambu IP_DA_IMPRESSORA
+   CLAUDINHO_DADOS="<data-directory>" bash "<plugin-root>/scripts/claudinho.sh" bambu PRINTER_IP
    ```
 
-   O script pede o código escondido e envia para a placa, que grava na
-   memória dela. O computador não guarda o código.
-3. Confira do seu lado com `bash "$R/scripts/claudinho.sh" log`: deve aparecer
-   `bambu: conectado` e `bambu: impressora <número de série>`. Se aparecer
-   `codigo de acesso recusado`, o código está errado ou falta ligar o modo
-   LAN; é só rodar o passo 2 de novo. Se nada aparecer, confira o IP (a
-   impressora tem de estar ligada e na mesma rede).
-4. `claudinho.sh painel` mostra o painel na hora (bom para testar).
+   The hidden code is sent to and stored on the board. The computer does not
+   keep it.
+3. Inspect `bash "$R/scripts/claudinho.sh" log` for printer connection and
+   authentication results. A refused code may mean a wrong code or disabled
+   local access. If there is no connection, check power, IP, and network.
+4. Show the printer dashboard immediately with `claudinho.sh painel`.
 
-Se a pessoa **fizer questão** de passar o código pelo chat, avise uma vez que
-ele ficará registrado na conversa, e só então rode você mesmo, pela entrada
-padrão: `printf '%s\n' 'CODIGO' | bash "$R/scripts/claudinho.sh" bambu IP`.
-Para desligar (apaga o código da placa): `claudinho.sh bambu desligar`.
+To disable the integration and delete the code from the board, use
+`claudinho.sh bambu desligar`. Configuration travels over local HTTP with the
+device secret; the connection is not encrypted.
 
-O código vai do computador para a placa pela rede local, junto com o segredo
-do Claudinho (como os outros comandos): protegido contra quem não tem o
-segredo, mas sem criptografia na rede de casa.
+## Tool scenes
 
-## Cenas
+While Claude Code uses tools, the screen can show an editor, terminal, reading
+animation, or agent diagram. Hooks send only a fixed category, never file names
+or command contents. Explain that the scene is a decorative indication of the
+category. To preview one:
 
-Enquanto o Claude usa ferramentas, a tela mostra uma cena em vez da cara de
-trabalhando: editor de código (editar arquivo), terminal (comandos), chuva do
-Matrix (ler/procurar) e organograma (subagentes), com um mini Claudinho no
-canto. É tudo de mentira: o hook manda só a categoria, nunca arquivo ou
-comando. Se a pessoa perguntar, explique isso; para mostrar uma:
-`claudinho.sh cena codando|terminal|lendo|agente`. As cenas usam a fonte 5
-(JetBrains Mono) da tela: quem atualizar o firmware para 1.6 ou mais precisa
-também da tela nova (`claudinho.sh tela`, pede um toque).
+```bash
+bash "$R/scripts/claudinho.sh" cena codando
+```
 
-## Referência rápida
+Other supported categories are `terminal`, `lendo`, and `agente`.
 
-`claudinho.sh info | log | cara <tipo> [humor] | cor [R G B [salvar]] | velha | genius | bambu IP|desligar | painel | alerta [tipo] | cena <tipo> | reiniciar | consumo [s] | atualizar [bin] | tela [tft]`
+## Command reference
 
-`atualizar` e `tela` pedem um toque na tela do Claudinho (avise a pessoa antes).
-Tipos de cara: inicio, prompt, ferramenta, erro, parou, atencao, compact, fim, dormir.
-Humor (com prompt): feliz, preocupado, susto.
+Command names retain their existing Portuguese identifiers for compatibility:
+
+```text
+claudinho.sh info | log | cara <type> [mood] | cor R G B [salvar]
+claudinho.sh bambu IP|desligar | painel | alerta [type] | cena <type>
+claudinho.sh reiniciar | consumo [seconds] | atualizar [firmware.bin]
+```
+
+Face events: `inicio`, `prompt`, `ferramenta`, `erro`, `parou`, `atencao`,
+`compact`, `fim`, `dormir`. Prompt moods: `feliz`, `preocupado`, `susto`.
+The legacy commands `tela`, `velha`, `genius`, and the touch palette do not apply
+to this GC9A01 setup.

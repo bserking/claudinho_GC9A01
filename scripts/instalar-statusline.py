@@ -31,20 +31,24 @@ if remover:
         if ant: s["statusLine"] = {"type": "command", "command": ant}
         else: s.pop("statusLine", None)
     grava("CLAUDINHO_STATUSLINE_ANTERIOR", None)
-    print("status line do Claudinho removida")
+    print("Claudinho status line removed")
 else:
     dados.mkdir(parents=True, exist_ok=True)
     destino = dados / "claudinho-statusline.py"
     shutil.copy2(raiz / "statusline.py", destino)
     if atual and "claudinho" not in atual:
         grava("CLAUDINHO_STATUSLINE_ANTERIOR", atual)
-        print(f"status line existente preservada: {atual}")
-    comando = f'CLAUDINHO_DADOS={shlex.quote(str(dados))} python3 {shlex.quote(str(destino))}'
+        print(f"existing status line preserved: {atual}")
+    # No Windows/Git Bash, "python3" pode ser apenas o alias vazio da
+    # Microsoft Store. A instalacao real encontrada pelo setup chama-se
+    # "python"; Linux/macOS continuam usando "python3".
+    python_cmd = "python" if sys.platform == "win32" else "python3"
+    comando = f'CLAUDINHO_DADOS={shlex.quote(str(dados))} {python_cmd} {shlex.quote(str(destino))}'
     sl = s.get("statusLine") or {}
     sl.update({"type": "command", "command": comando})
     sl.setdefault("refreshInterval", 60)
     s["statusLine"] = sl
-    print("status line ligada")
+    print("status line enabled")
 cfg_path.parent.mkdir(parents=True, exist_ok=True)
 cfg_path.write_text(json.dumps(s, indent=2, ensure_ascii=False) + "\n")
 if backup.exists(): print(f"backup: {backup}")

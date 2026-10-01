@@ -1,20 +1,20 @@
 {
   "name": "claudinho",
   "displayName": "Claudinho",
-  "version": "1.8.3",
-  "description": "O mascote do Claude Code vivo na sua mesa: um ESP32 com display que reage ao que o Claude está fazendo e mostra o uso do plano. Sem servidor e sem token da Anthropic.",
+  "version": "1.8.3-gc9a01.4",
+  "description": "Claudinho for ESP32-C3 Super Mini with a round GC9A01 display (240x240, SPI).",
   "author": {
     "name": "Argeu Thiesen"
   },
   "keywords": [
     "esp32",
-    "nextion",
+    "gc9a01",
     "clawd",
     "hardware",
     "statusline",
     "hooks"
   ],
-  "homepage": "https://github.com/argeuthiesen/claudinho",
-  "repository": "https://github.com/argeuthiesen/claudinho",
+  "homepage": "https://github.com/bserking/claudinho_GC9A01",
+  "repository": "https://github.com/bserking/claudinho_GC9A01",
   "license": "MIT"
 }

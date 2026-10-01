@@ -9,7 +9,7 @@
 # reiniciando quando a porta abre). Imprime so as linhas com o prefixo.
 source "$(dirname "$0")/comum.sh"
 PORTA="$1"; CMD="$2"; PREF="$3"; FIM="${4:-}"; SEG="${5:-30}"
-case "$SEG" in ''|*[!0-9]*) echo "tempo invalido: $SEG" >&2; exit 1 ;; esac
+case "$SEG" in ''|*[!0-9]*) echo "invalid timeout: $SEG" >&2; exit 1 ;; esac
 case "$(ambiente)" in
   wsl|windows)
     q() { printf '%s' "$1" | sed "s/'/''/g"; }
@@ -19,7 +19,7 @@ case "$(ambiente)" in
 \$p = New-Object System.IO.Ports.SerialPort('$(q "$PORTA")', 115200)
 \$p.Encoding = [System.Text.Encoding]::UTF8   # nomes de rede com acento
 \$p.NewLine = \"\`n\"; \$p.ReadTimeout = 500; \$p.DtrEnable = \$true; \$p.RtsEnable = \$false
-try { \$p.Open() } catch { Write-Output ('ERRO porta: ' + \$_.Exception.Message); exit 2 }
+try { \$p.Open() } catch { Write-Output ('Port error: ' + \$_.Exception.Message); exit 2 }
 \$cmd = $LECMD
 \$fim = (Get-Date).AddSeconds($SEG); \$ok = \$false
 while ((Get-Date) -lt \$fim -and -not \$ok) {
@@ -51,5 +51,5 @@ if (-not \$ok) { exit 1 }"
     done
     exec 3>&-
     exit $ok ;;
-  *) echo "ambiente nao suportado" >&2; exit 1 ;;
+  *) echo "unsupported environment" >&2; exit 1 ;;
 esac

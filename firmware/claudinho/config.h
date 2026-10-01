@@ -1,9 +1,27 @@
 // Configuracao de compilacao do Claudinho. Nada pessoal aqui: Wi-Fi e segredo
 // sao gravados na placa na primeira vez (ver o cabecalho do claudinho.ino).
 
-#define VERSAO "1.8.3"
+#define VERSAO "1.8.3-gc9a01.4"
 
-// Serial do Nextion. A placa e detectada na compilacao.
+// Variante dieses Forks: rundes GC9A01-Display (240 x 240, SPI) am
+// ESP32-C3 Super Mini. Auf 0 setzen, um die originale Nextion-Ausgabe zu
+// kompilieren. Der GC9A01 hat in dieser Verdrahtung keinen Touch-Controller;
+// der BOOT-Taster uebernimmt Bestaetigungen und die einfache Navigation.
+#define DISPLAY_GC9A01 1
+
+#if DISPLAY_GC9A01
+  #define DISPLAY_NOME "gc9a01-240x240"
+  #define TFT_SCLK  4
+  #define TFT_MOSI  5
+  #define TFT_CS    6
+  #define TFT_DC    7
+  #define TFT_RST  10
+#else
+  #define DISPLAY_NOME "nextion-nx3224f024"
+#endif
+
+// Placa detectada na compilacao. Os pinos seriais so sao usados pela
+// variante Nextion original.
 #if CONFIG_IDF_TARGET_ESP32C3
   // ESP32-C3 Super Mini: pinos marcados TX e RX na placa. 5V vem do pino "5V".
   #define PLACA_NOME  "esp32c3"
@@ -30,6 +48,6 @@
 #define MANUT_JANELA_MS   120000  // depois do toque, quanto tempo /ota e /tft ficam liberados
 
 // Fuso (POSIX TZ) e relogio por NTP.
-#define FUSO  "<-03>3"            // Brasilia; ex.: Lisboa "WET0WEST,M3.5.0/1,M10.5.0"
+#define FUSO  "CET-1CEST,M3.5.0,M10.5.0/3"  // Deutschland, inklusive Sommerzeit
 #define NTP_1 "pool.ntp.org"
 #define NTP_2 "time.google.com"

@@ -72,7 +72,7 @@ def main():
             cfg_curl = (f'header = "Authorization: Bearer {token}"\n'
                         'header = "Content-Type: application/json"\n'
                         f'data-binary = "{corpo}"\n')
-            p = subprocess.Popen(["curl", "-s", "-o", os.devnull, "-m", "3", "-X", "POST", f"http://{ip}/estado", "-K", "-"],
+            p = subprocess.Popen(["curl", "-s", "-o", os.devnull, "-m", "10", "-X", "POST", f"http://{ip}/estado", "-K", "-"],
                                  stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                                  start_new_session=True)
             p.stdin.write(cfg_curl.encode()); p.stdin.close()

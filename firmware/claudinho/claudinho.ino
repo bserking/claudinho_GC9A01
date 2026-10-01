@@ -1,6 +1,7 @@
 /*
  * Claudinho — o mascote do Claude Code, vivo, na sua mesa.
- * ESP32-C3 Super Mini (ou ESP32-S3) + Nextion Discovery NX3224F024 (320x240).
+ * ESP32-C3 Super Mini + GC9A01 redondo (240x240, SPI), ou a variante
+ * original com ESP32-C3/S3 + Nextion Discovery NX3224F024 (320x240).
  *
  * Tela 0 (padrao): os olhos do Clawd, pixelados, na tela inteira, reagindo ao
  *                  que o Claude Code esta fazendo (hooks) e ao uso do plano.
@@ -24,7 +25,7 @@
 
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
-#include "hms_pt.h"      // avisos HMS da Bambu em portugues (gerado por firmware/hms/gerar.py)
+#include "hms_en.h"      // English Bambu HMS alerts, generated offline.
 #include <esp_wifi.h>
 #include <WebServer.h>
 #include <Preferences.h>
@@ -35,6 +36,14 @@
 #include <sys/time.h>
 #include <stdarg.h>
 #include "config.h"
+#include "face_preview.h"
+
+#if DISPLAY_GC9A01
+  #include <SPI.h>
+  #include <Adafruit_GFX.h>
+  #include <Adafruit_GC9A01A.h>
+  Adafruit_GC9A01A tft(TFT_CS, TFT_DC, TFT_RST);
+#endif
 
 // ---------------------------------------------------------------- cores 565
 #define RGB565(r, g, b) ((uint16_t)((((r) >> 3) << 11) | (((g) >> 2) << 5) | ((b) >> 3)))
@@ -65,10 +74,9 @@ static const int LARG = 320;
 
 // ---------------------------------------------------------------- estado
 struct Dados {
-  int  h5 = 0, d7 = 0, ctx = 0, n = 0;
+  int  h5 = -1, d7 = -1, ctx = -1, n = 0;  // -1 means unavailable, never 0%.
   long h5r = 0, d7r = 0, at = 0;
   char mod[17] = "";
-  bool ok = false;
 };
 Dados dados;
 
@@ -129,7 +137,9 @@ unsigned long ultimoIntenso = 0;
 static const unsigned long INTENSO_INTERVALO_MS = 5UL * 60 * 1000;
 bool brilhoAlto = true;
 
+#if !DISPLAY_GC9A01
 HardwareSerial& nex = Serial1;
+#endif
 
 // Configuracao gravada na placa (NVS). Vazia de fabrica.
 Preferences prefs;
@@ -195,7 +205,118 @@ struct BlocoJanela {
 };
 BlocoJanela b5h(22), b7d(96);
 
-// ---------------------------------------------------------------- nextion
+const char* caraNome(Cara c) {
+  switch (c) {
+    case C_DORMINDO:    return "Sleeping";
+    case C_NEUTRO:      return "Neutral";
+    case C_PENSANDO:    return "Thinking";
+    case C_TRABALHANDO: return "Working";
+    case C_ESPERANDO:   return "Waiting for you";
+    case C_TERMINOU:    return "Done";
+    case C_FELIZ:       return "Happy";
+    case C_EMPOLGADO:   return "Excited";
+    case C_PREOCUPADO:  return "Worried";
+    case C_SUSTO:       return "Startled";
+    case C_ZONZO:       return "Dizzy";
+    case C_CANSADO:     return "Tired";
+    case C_SUANDO:      return "Sweating";
+    case C_BRAVO:       return "Angry";
+    case C_TRISTE:      return "Sad";
+    case C_DESCONFIADO: return "Suspicious";
+  }
+  return "Unknown";
+}
+
+// ---------------------------------------------------------------- display
+#if DISPLAY_GC9A01
+// O layout original usa coordenadas logicas 320 x 240. Para preservar as
+// animacoes e todas as telas, X e convertido para os 240 pixels fisicos. Nas
+// telas de dados deixamos ainda uma margem para o recorte circular; o rosto e
+// as cenas continuam usando todo o diametro.
+int telaX(int x) {
+  if (pagina == 0 || pagina == 10) return constrain((x * 240 + 160) / 320, 0, 240);
+  return constrain(16 + (x * 208 + 160) / 320, 0, 240);
+}
+int telaY(int y) {
+  if (pagina == 0 || pagina == 10) return constrain(y, 0, 240);
+  return constrain(12 + (y * 216 + 120) / 240, 0, 240);
+}
+
+// Converte os caracteres portugueses usados pelo firmware para ASCII. A
+// fonte bitmap compacta do Adafruit_GFX fica assim legivel sem carregar uma
+// segunda fonte grande na memoria do C3.
+void textoAscii(const char* in, char* out, size_t n) {
+  size_t j = 0;
+  for (size_t i = 0; in && in[i] && j + 1 < n; i++) {
+    uint8_t c = (uint8_t)in[i];
+    if (c == 0xC2 && in[i + 1]) { c = (uint8_t)in[++i]; out[j++] = c == 0xB0 ? 'o' : c == 0xB7 ? '.' : ' '; continue; }
+    if (c == 0xC3 && in[i + 1]) {
+      c = (uint8_t)in[++i];
+      if (c >= 0x80 && c <= 0x85) out[j++] = 'A';
+      else if (c >= 0xA0 && c <= 0xA5) out[j++] = 'a';
+      else if (c == 0x87) out[j++] = 'C'; else if (c == 0xA7) out[j++] = 'c';
+      else if ((c >= 0x88 && c <= 0x8B)) out[j++] = 'E'; else if (c >= 0xA8 && c <= 0xAB) out[j++] = 'e';
+      else if ((c >= 0x8C && c <= 0x8F)) out[j++] = 'I'; else if (c >= 0xAC && c <= 0xAF) out[j++] = 'i';
+      else if ((c >= 0x92 && c <= 0x96)) out[j++] = 'O'; else if (c >= 0xB2 && c <= 0xB6) out[j++] = 'o';
+      else if ((c >= 0x99 && c <= 0x9C)) out[j++] = 'U'; else if (c >= 0xB9 && c <= 0xBC) out[j++] = 'u';
+      else out[j++] = '?';
+      continue;
+    }
+    switch (c) {
+      case 0xE0: case 0xE1: case 0xE2: case 0xE3: case 0xE4: case 0xE5: c = 'a'; break;
+      case 0xE7: c = 'c'; break;
+      case 0xE8: case 0xE9: case 0xEA: case 0xEB: c = 'e'; break;
+      case 0xEC: case 0xED: case 0xEE: case 0xEF: c = 'i'; break;
+      case 0xF2: case 0xF3: case 0xF4: case 0xF5: case 0xF6: c = 'o'; break;
+      case 0xF9: case 0xFA: case 0xFB: case 0xFC: c = 'u'; break;
+      case 0xB0: c = 'o'; break; case 0xB7: c = '.'; break;
+      default: if (c >= 0x80) c = '?'; break;
+    }
+    out[j++] = (char)c;
+  }
+  out[j] = 0;
+}
+
+void preenche(int x, int y, int w, int h, uint16_t cor) {
+  int x1 = telaX(x), x2 = telaX(x + w), y1 = telaY(y), y2 = telaY(y + h);
+  if (x2 > x1 && y2 > y1) tft.fillRect(x1, y1, x2 - x1, y2 - y1, cor);
+}
+void limpaTela(uint16_t cor) { tft.fillScreen(cor); }
+void escreve(int x, int y, int w, int h, int fonte, uint16_t cor, uint16_t fundo, int alin, const char* t) {
+  int x1 = telaX(x), x2 = telaX(x + w), y1 = telaY(y), y2 = telaY(y + h);
+  if (x2 <= x1 || y2 <= y1) return;
+  tft.fillRect(x1, y1, x2 - x1, y2 - y1, fundo);
+  char s[120]; textoAscii(t, s, sizeof s);
+  // Evita que texto importante desapareca nas bordas redondas. O fundo pode
+  // continuar retangular (os pixels fora do circulo nao existem), mas a caixa
+  // efetiva do texto e limitada pela corda disponivel naquela altura.
+  int cy = (y1 + y2) / 2, dy = abs(cy - 120);
+  if (dy < 116) {
+    int metade = (int)sqrtf((float)(116 * 116 - dy * dy)) - 3;
+    x1 = max(x1, 120 - metade); x2 = min(x2, 120 + metade);
+  }
+  if (x2 <= x1) return;
+  int tam = fonte == FONTE_G ? 6 : fonte == FONTE_32 ? 4 : fonte == FONTE_M ? 3 : fonte == 5 ? 1 : 2;
+  int tw = strlen(s) * 6 * tam, th = 8 * tam;
+  while (tam > 1 && (tw > x2 - x1 || th > y2 - y1)) { tam--; tw = strlen(s) * 6 * tam; th = 8 * tam; }
+  if (tw > x2 - x1) {
+    int cabe = max(1, (x2 - x1) / (6 * tam));
+    if ((int)strlen(s) > cabe) s[cabe] = 0;
+    tw = strlen(s) * 6 * tam;
+  }
+  int tx = alin == 1 ? x1 + ((x2 - x1) - tw) / 2 : alin == 2 ? x2 - tw : x1;
+  int ty = y1 + ((y2 - y1) - th) / 2;
+  tft.setTextSize(tam); tft.setTextWrap(false);
+  tft.setTextColor(cor); tft.setCursor(max(x1, tx), max(y1, ty)); tft.print(s);
+}
+void circulo(int x, int y, int r, uint16_t cor) { tft.fillCircle(telaX(x), telaY(y), max(1, r), cor); }
+void circuloVazio(int x, int y, int r, uint16_t cor) { tft.drawCircle(telaX(x), telaY(y), max(1, r), cor); }
+void linhaFina(int x1, int y1, int x2, int y2, uint16_t cor) { tft.drawLine(telaX(x1), telaY(y1), telaX(x2), telaY(y2), cor); }
+void linha(int x1, int y1, int x2, int y2, uint16_t cor) {
+  linhaFina(x1, y1, x2, y2, cor); linhaFina(x1, y1 + 1, x2, y2 + 1, cor);
+}
+
+#else
 // O Nextion tem buffer de 1 KB e desenha mais devagar do que 115200 baud
 // entrega. Sem folga entre comandos, uma troca de cara (30-40 fills) estoura o
 // buffer e ele descarta pedacos: sobra lixo na tela. Cada comando espera o
@@ -232,10 +353,26 @@ void linha(int x1, int y1, int x2, int y2, uint16_t cor) {
   nexCmdf("line %d,%d,%d,%d,%u", x1, y1, x2, y2, cor);
   nexCmdf("line %d,%d,%d,%d,%u", x1, y1 + 1, x2, y2 + 1, cor);
 }
+void circuloVazio(int x, int y, int r, uint16_t cor) { nexCmdf("cir %d,%d,%d,%u", x, y, r, cor); }
+void linhaFina(int x1, int y1, int x2, int y2, uint16_t cor) { nexCmdf("line %d,%d,%d,%d,%u", x1, y1, x2, y2, cor); }
+#endif
 
 // Log: vai para a serial e para um buffer circular lido em GET /log, para
 // dar para diagnosticar sem cabo.
 static char logBuf[3072]; static size_t logPos = 0; static bool logCheio = false;
+struct HistorieEintrag { long zeit; unsigned long sekunden; char art[12]; char text[76]; };
+static const int HISTORIE_MAX = 24;
+HistorieEintrag historie[HISTORIE_MAX];
+int historieKopf = 0, historieAnzahl = 0, letzteHistorieCara = -1;
+
+void merkt(const char* art, const char* fmt, ...) {
+  HistorieEintrag& e = historie[historieKopf];
+  e.zeit = (long)time(nullptr); e.sekunden = millis() / 1000;
+  strlcpy(e.art, art, sizeof e.art);
+  va_list ap; va_start(ap, fmt); vsnprintf(e.text, sizeof e.text, fmt, ap); va_end(ap);
+  historieKopf = (historieKopf + 1) % HISTORIE_MAX;
+  if (historieAnzahl < HISTORIE_MAX) historieAnzahl++;
+}
 void registra(const char* fmt, ...) {
   char buf[200]; va_list ap; va_start(ap, fmt); vsnprintf(buf, sizeof buf, fmt, ap); va_end(ap);
   Serial.println(buf);
@@ -249,27 +386,27 @@ void horaStr(time_t t, char* out, size_t n) {
   snprintf(out, n, "%02d:%02d", tm.tm_hour, tm.tm_min);
 }
 void diaHoraStr(time_t t, char* out, size_t n) {
-  static const char* DIAS[] = {"dom", "seg", "ter", "qua", "qui", "sex", "sab"};
+  static const char* DIAS[] = {"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"};
   struct tm tm, hoje; time_t agora = time(nullptr);
   localtime_r(&t, &tm); localtime_r(&agora, &hoje);
   if (tm.tm_yday == hoje.tm_yday && tm.tm_year == hoje.tm_year)
-    snprintf(out, n, "hoje %02d:%02d", tm.tm_hour, tm.tm_min);
+    snprintf(out, n, "today %02d:%02d", tm.tm_hour, tm.tm_min);
   else
     snprintf(out, n, "%s %02d:%02d", DIAS[tm.tm_wday], tm.tm_hour, tm.tm_min);
 }
 void restanteStr(long ate, char* out, size_t n) {
   long s = ate - (long)time(nullptr); if (s < 0) s = 0;
   long d = s / 86400, h = (s % 86400) / 3600, m = (s % 3600) / 60;
-  if (d > 0)      snprintf(out, n, "em %ld d %ld h", d, h);
-  else if (h > 0) snprintf(out, n, "em %ld h %02ld min", h, m);
-  else            snprintf(out, n, "em %ld min", m);
+  if (d > 0)      snprintf(out, n, "in %ld d %ld h", d, h);
+  else if (h > 0) snprintf(out, n, "in %ld h %02ld min", h, m);
+  else            snprintf(out, n, "in %ld min", m);
 }
 bool relogioValido() { return time(nullptr) > 1600000000L; }
 void ajustaRelogio(long agora) {
   if (agora > 1600000000L) { struct timeval tv = { (time_t)agora, 0 }; settimeofday(&tv, nullptr); }
 }
 uint16_t corPct(int pct) { return pct >= 90 ? COR_CRITICO : pct >= 75 ? COR_ALERTA : COR_OURO; }
-bool congelado() { return dados.ok && dados.at > 0 && relogioValido() && (long)time(nullptr) - dados.at > CONGELADO_APOS_S; }
+bool congelado() { return dados.at > 0 && relogioValido() && (long)time(nullptr) - dados.at > CONGELADO_APOS_S; }
 
 // ---------------------------------------------------------------- rosto
 // Cada olho e desenhado linha a linha (uma celula de altura), com um "fill"
@@ -279,10 +416,13 @@ bool congelado() { return dados.ok && dados.at > 0 && relogioValido() && (long)t
 void celula(int cx, int cy, int w, int h, uint16_t cor) { preenche(cx * CEL, cy * CEL, w * CEL, h * CEL, cor); }
 
 Caixa ultimaEsq, ultimaDir, ultimaExtra, ultimaBoca;
-// O que esta na tela agora (o simulador de PC compara com um desenho limpo).
-Expr exprNaTela; Cara extrasCaraNaTela = C_NEUTRO; int extrasFaseNaTela = 0;
 uint16_t corRostoAtual = COR_ROSTO;          // escolhida na paleta (claudinho.sh cor) ou por /cmd {"cor":[r,g,b]}; gravada na placa
 uint16_t corRosto() { return corRostoAtual; }
+void gravaCor(uint16_t cor) {
+  corRostoAtual = cor;
+  prefs.begin("claudinho", false); prefs.putUShort("cor", cor); prefs.end();
+  registra("color: saved 0x%04X", cor);
+}
 void apaga(Caixa& c) { if (c.w) { celula(c.x, c.y, c.w, c.h, corRosto()); c = {}; } }
 
 void recorte(const Olho& o, int r, int& corteExt, int& corteInt) {
@@ -398,7 +538,6 @@ void glifoExclamacao(int x, int y, uint16_t c) { celula(x, y, 2, 5, c); celula(x
 static Cara extrasCUlt = C_NEUTRO; static int extrasChaveUlt = -1;
 void esqueceExtras() { extrasCUlt = C_NEUTRO; extrasChaveUlt = -1; }
 void extras(Cara c, int fase) {
-  extrasCaraNaTela = c; extrasFaseNaTela = fase;
   Cara& cUlt = extrasCUlt; int& chaveUlt = extrasChaveUlt;
   int chave;                                            // o que de fato muda com a fase, por cara
   switch (c) {
@@ -484,7 +623,6 @@ void expressao(Cara c, int fase, Expr& x) {
 }
 
 void desenhaExpr(const Expr& x) {
-  exprNaTela = x;
   desenhaOlho(x.e, OLHO_ESQ_X, true,  x.cor, ultimaEsq, formaEsq);
   desenhaOlho(x.d, OLHO_DIR_X, false, x.cor, ultimaDir, formaDir);
   desenhaBoca(x.boca);
@@ -497,7 +635,7 @@ bool caraAnimada(Cara c) {
 bool caraPisca(Cara c) { return c == C_NEUTRO || c == C_CANSADO || c == C_ESPERANDO || c == C_PREOCUPADO || c == C_DESCONFIADO || c == C_PENSANDO; }
 
 Cara caraBase() {
-  if (!dados.ok || congelado() || dados.n == 0) return C_DORMINDO;   // n == 0: todas as sessoes fechadas
+  if (congelado() || dados.n == 0) return C_DORMINDO;   // App activity does not require usage data.
   if (dados.h5 >= 90) return C_SUANDO;
   if (dados.h5 >= 75) return C_CANSADO;
   return C_NEUTRO;
@@ -518,7 +656,9 @@ void trataEvento(const char* tipo, const char* humor) {
   if (consumo.naTela && pagina != 0 && !manter) mudaPagina(0);    // qualquer evento volta ao rosto na hora (mantida: fica)
   if (pagina == 9 && !manter && !strcmp(tipo, "atencao")) mudaPagina(0);
   if (pagina == 10 && strcmp(tipo, "ferramenta")) mudaPagina(0);   // qualquer outro evento: sai da cena e mostra a cara   // o Claude precisa de voce: vale mais que o painel
+#if !DISPLAY_GC9A01
   if (pagina == 6 && !strcmp(tipo, "atencao")) avisoVelha();   // no jogo: so avisa no canto
+#endif
   if      (!strcmp(tipo, "inicio"))     { poeCara(C_FELIZ, 5000); pedeConsumo(20000, false, false); }
   else if (!strcmp(tipo, "prompt")) {
     if      (!strcmp(humor, "feliz"))      poeCara(C_EMPOLGADO, 5000);
@@ -552,6 +692,10 @@ void cuidaRosto() {
   if (!caraDesenhada || c != caraNaTela) {
     caraNaTela = c; caraDesenhada = true; fase = 0;
     Serial.printf("CARA %d\n", (int)c);
+    if ((int)c != letzteHistorieCara) {
+      letzteHistorieCara = (int)c;
+      merkt("Face", "%s", caraNome(c));
+    }
     expressao(c, fase, x); desenhaExpr(x); extras(c, fase);
     proximaPiscada = agora + 2500 + random(3000); quadroPiscada = -1;
     proximoOlhar = agora + 4000 + random(5000); olharAte = 0;
@@ -599,16 +743,23 @@ void desenhaMoldura() {
     desenhaAlerta();
   } else if (pagina == 10) {
     cenaInicio();
+#if !DISPLAY_GC9A01
   } else if (pagina >= 6) {
     // os jogos desenham a propria tela
   } else if (pagina >= 3) {
     desenhaPaleta();
+#endif
   } else if (pagina == 2) {
     limpaTela(COR_FUNDO);
-    escreve(0,  40, 320, 30, FONTE_M,  COR_OURO,    COR_FUNDO, 1, "O PC quer me atualizar");
-    escreve(0,  90, 320, 38, FONTE_32, COR_TEXTO,   COR_FUNDO, 1, "Toque na tela");
-    escreve(0, 130, 320, 38, FONTE_32, COR_TEXTO,   COR_FUNDO, 1, "para permitir");
-    escreve(0, 196, 320, 20, FONTE_P,  COR_APAGADO, COR_FUNDO, 1, "(ou aperte BOOT na placa)");
+    escreve(0,  40, 320, 30, FONTE_M,  COR_OURO,    COR_FUNDO, 1, "Update requested");
+#if DISPLAY_GC9A01
+    escreve(0,  90, 320, 38, FONTE_32, COR_TEXTO,   COR_FUNDO, 1, "Press BOOT");
+    escreve(0, 130, 320, 38, FONTE_32, COR_TEXTO,   COR_FUNDO, 1, "to allow");
+#else
+    escreve(0,  90, 320, 38, FONTE_32, COR_TEXTO,   COR_FUNDO, 1, "Tap the screen");
+    escreve(0, 130, 320, 38, FONTE_32, COR_TEXTO,   COR_FUNDO, 1, "to allow");
+    escreve(0, 196, 320, 20, FONTE_P,  COR_APAGADO, COR_FUNDO, 1, "(or press BOOT on the board)");
+#endif
   } else {
     limpaTela(COR_FUNDO);
     preenche(6, b5h.y, 308, 72, COR_BLOCO);
@@ -619,27 +770,31 @@ void desenhaMoldura() {
 }
 
 void desenhaCabecalho() {
+#if DISPLAY_GC9A01
+  escreve(0, 3, 320, 19, FONTE_P, COR_OURO, COR_FUNDO, 1, "CLAUDE CODE");
+#else
   char t[24];
   snprintf(t, sizeof t, "CLAUDE CODE");
   cTitulo.mostra(t, COR_OURO);
   if (relogioValido()) { horaStr(time(nullptr), t, sizeof t); cRelogio.mostra(t, COR_TEXTO); }
   else cRelogio.mostra("--:--", COR_APAGADO);
+#endif
 }
 
 void desenhaRodape() {
   char t[48], h[16];
-  if (servidor == SRV_SEM_WIFI)       { cRodape.mostra("sem wifi", COR_CRITICO); return; }
-  if (servidor == SRV_INICIANDO)      { cRodape.mostra("conectando...", COR_APAGADO); return; }
-  if (!dados.ok || dados.at == 0) {
-    snprintf(t, sizeof t, "aguardando o PC - %s", WiFi.localIP().toString().c_str());
+  if (servidor == SRV_SEM_WIFI)       { cRodape.mostra("no Wi-Fi", COR_CRITICO); return; }
+  if (servidor == SRV_INICIANDO)      { cRodape.mostra("connecting...", COR_APAGADO); return; }
+  if (dados.at == 0) {
+    snprintf(t, sizeof t, "waiting for PC - %s", WiFi.localIP().toString().c_str());
     cRodape.mostra(t, COR_APAGADO); return;
   }
   if (congelado()) {
     diaHoraStr(dados.at, h, sizeof h);
-    snprintf(t, sizeof t, "dormindo desde %s", h);
+    snprintf(t, sizeof t, "sleeping since %s", h);
     cRodape.mostra(t, COR_APAGADO);
   } else {
-    snprintf(t, sizeof t, "%d terminal%s - %s", dados.n, dados.n == 1 ? "" : "is", WiFi.localIP().toString().c_str());
+    snprintf(t, sizeof t, "%d session%s - %s", dados.n, dados.n == 1 ? "" : "s", WiFi.localIP().toString().c_str());
     cRodape.mostra(t, COR_OK);
   }
 }
@@ -648,11 +803,11 @@ void desenhaJanela(BlocoJanela& b, const char* nome, int pct, long reseta, bool 
   char t[40];
   b.rotulo.mostra(nome, COR_APAGADO);
   bool vencida = reseta > 0 && relogioValido() && (long)time(nullptr) >= reseta;
-  if (dados.ok && vencida) {             // numero velho de uma janela que ja renovou
-    b.pct.mostra("0%", COR_TEXTO); b.reseta.mostra("renovou!", COR_OK); b.resta.mostra("", COR_TEXTO);
+  if (vencida) {             // The expired window is not a current measurement.
+    b.pct.mostra("--", COR_APAGADO); b.reseta.mostra("reset!", COR_OK); b.resta.mostra("", COR_TEXTO);
     b.barra.mostra(0, COR_OURO); return;
   }
-  if (dados.ok) {
+  if (pct >= 0) {
     // Na exibicao automatica, o numero acima de 75 % sai na cor do alerta; no
     // modo intenso (>= 90 %) pisca a cada segundo (desenha() roda a cada 1 s).
     uint16_t cor = COR_TEXTO;
@@ -662,18 +817,18 @@ void desenhaJanela(BlocoJanela& b, const char* nome, int pct, long reseta, bool 
     if (reseta > 0 && relogioValido()) {
       char h[20];
       if (semana) diaHoraStr(reseta, h, sizeof h); else horaStr(reseta, h, sizeof h);
-      snprintf(t, sizeof t, "reseta %s", h); b.reseta.mostra(t, COR_APAGADO);
+      snprintf(t, sizeof t, "resets %s", h); b.reseta.mostra(t, COR_APAGADO);
       restanteStr(reseta, t, sizeof t);      b.resta.mostra(t, COR_TEXTO);
-    } else { b.reseta.mostra(pct == 0 ? "janela livre" : "", COR_APAGADO); b.resta.mostra("", COR_TEXTO); }
-  } else { b.pct.mostra("--", COR_APAGADO); b.reseta.mostra("aguardando", COR_APAGADO); b.resta.mostra("", COR_TEXTO); }
-  b.barra.mostra(dados.ok ? pct : 0, corPct(pct));
+    } else { b.reseta.mostra(pct == 0 ? "window clear" : "", COR_APAGADO); b.resta.mostra("", COR_TEXTO); }
+  } else { b.pct.mostra("--", COR_APAGADO); b.reseta.mostra("waiting", COR_APAGADO); b.resta.mostra("", COR_TEXTO); }
+  b.barra.mostra(pct >= 0 ? pct : 0, corPct(pct));
 }
 
 void desenha() {
   if (pagina == 0 || pagina >= 2) return;   // olhos, manutencao ou paleta: nada a atualizar
   desenhaCabecalho();
-  desenhaJanela(b5h, "SESSAO  5 HORAS", dados.h5, dados.h5r, false);
-  desenhaJanela(b7d, "SEMANA  7 DIAS",  dados.d7, dados.d7r, true);
+  desenhaJanela(b5h, "SESSION  5 HOURS", dados.h5, dados.h5r, false);
+  desenhaJanela(b7d, "WEEK  7 DAYS",  dados.d7, dados.d7r, true);
   desenhaRodape();
 }
 
@@ -701,28 +856,28 @@ void confereLimites() {
   int f5 = faixaDe(dados.h5), f7 = faixaDe(dados.d7);
   if (faixa5 < 0) { faixa5 = f5; faixa7 = f7; mostrado5 = dados.h5; mostrado7 = dados.d7; return; }   // primeiro dado apos ligar: sem alarde
   bool subiu = false;
-  if (f5 > faixa5) { registra("consumo: 5 h passou de %d%%", f5); subiu = true; }
-  if (f7 > faixa7) { registra("consumo: 7 dias passou de %d%%", f7); subiu = true; }
+  if (f5 > faixa5) { registra("usage: 5 h crossed %d%%", f5); subiu = true; }
+  if (f7 > faixa7) { registra("usage: 7 days crossed %d%%", f7); subiu = true; }
   faixa5 = f5; faixa7 = f7;                  // tambem desce quando a janela renova
   if (subiu) { bool i = usoIntenso(); pedeConsumo(i ? 30000 : 15000, false, i); if (i) ultimoIntenso = 0; }
 }
 
 // Janela que venceu: carinha feliz e zera as referencias.
 void confereRenovacao() {
-  if (!dados.ok || !relogioValido()) return;
+  if (!relogioValido()) return;
   long agora = time(nullptr);
   bool v5 = dados.h5r > 0 && agora >= dados.h5r, v7 = dados.d7r > 0 && agora >= dados.d7r;
   bool nova = (v5 && !renovou5) || (v7 && !renovou7);
-  if (v5 && !renovou5) { mostrado5 = 0; faixa5 = 0; }
-  if (v7 && !renovou7) { mostrado7 = 0; faixa7 = 0; }
+  if (v5) { dados.h5 = -1; if (!renovou5) { mostrado5 = 0; faixa5 = 0; } }
+  if (v7) { dados.d7 = -1; if (!renovou7) { mostrado7 = 0; faixa7 = 0; } }
   renovou5 = v5; renovou7 = v7;
-  if (nova && dados.n > 0 && !congelado()) { registra("consumo: janela renovou"); poeCara(C_FELIZ, 5000); }
+  if (nova && dados.n > 0 && !congelado()) { registra("usage: window reset"); poeCara(C_FELIZ, 5000); }
 }
 
 // Atende o pedido pendente quando o Claudinho esta parado no rosto.
 void cuidaConsumo() {
   if (!consumo.pendente || pagina != 0) return;
-  if (!dados.ok || dados.n == 0 || congelado()) { consumo.pendente = false; return; }
+  if ((dados.h5 < 0 && dados.d7 < 0) || dados.n == 0 || congelado()) { consumo.pendente = false; return; }
   if (evento.ate && (long)(millis() - evento.ate) < 0) return;      // ainda numa cara de evento
   consumo.pendente = false;
   bool intenso = consumo.intenso;
@@ -733,13 +888,15 @@ void cuidaConsumo() {
     if (vezIntensa) intenso = true;
   }
   unsigned long dur = intenso ? max(consumo.dur, 30000UL) : consumo.dur;
-  registra("consumo: mostrando %lu s%s", dur / 1000, intenso ? " (intenso)" : "");
+  registra("usage: showing for %lu s%s", dur / 1000, intenso ? " (high usage)" : "");
   mudaPagina(1);
   paginaDur = dur; consumo.naTela = true; consumo.telaIntensa = intenso;
   mostrado5 = dados.h5; mostrado7 = dados.d7;
   if (intenso) ultimoIntenso = millis();
 }
 
+#if !DISPLAY_GC9A01
+// Touch-only features are excluded from the button-only GC9A01 build.
 // ---------------------------------------------------------------- paleta de cor do rosto
 // claudinho.sh cor (sem numeros) abre a paleta na tela, para combinar o rosto
 // com a cor do filamento. Pagina 3: 6 cores base; pagina 4: 12 variacoes da
@@ -796,7 +953,7 @@ uint16_t corTom(int k) { return k < 0 ? corBase(paletaBase) : corVariacao(paleta
 void desenhaCentroPaleta() {
   uint16_t c = corTom(paletaTom);
   preenche(CEL_W + 2, CEL_H + 2, 320 - 2 * CEL_W - 4, 240 - 2 * CEL_H - 4, c);
-  escreve(CEL_W + 2, 150, 320 - 2 * CEL_W - 4, 18, FONTE_P, COR_OLHO, c, 1, "toque para confirmar");
+  escreve(CEL_W + 2, 150, 320 - 2 * CEL_W - 4, 18, FONTE_P, COR_OLHO, c, 1, "tap to confirm");
 }
 
 void irPaleta(int p) { mudaPagina(p); paginaDur = PALETA_ESPERA_MS; }
@@ -814,22 +971,16 @@ void desenhaPaleta() {
     ultimaEsq = {}; ultimaDir = {}; ultimaExtra = {}; ultimaBoca = {};
     formaEsq = Forma(); formaDir = Forma(); bocaNaTela = BP_NENHUMA; esqueceExtras();
     Expr x; expressao(C_NEUTRO, 0, x); desenhaExpr(x);
-    preenche(4,   200, 100, 36, COR_OK);      escreve(4,   208, 100, 20, FONTE_P, COR_BRANCO, COR_OK,      1, "Gravar");
-    preenche(110, 200, 100, 36, COR_FUNDO);   escreve(110, 208, 100, 20, FONTE_P, COR_BRANCO, COR_FUNDO,   1, "Voltar");
-    preenche(216, 200, 100, 36, COR_CRITICO); escreve(216, 208, 100, 20, FONTE_P, COR_BRANCO, COR_CRITICO, 1, "Cancelar");
+    preenche(4,   200, 100, 36, COR_OK);      escreve(4,   208, 100, 20, FONTE_P, COR_BRANCO, COR_OK,      1, "Save");
+    preenche(110, 200, 100, 36, COR_FUNDO);   escreve(110, 208, 100, 20, FONTE_P, COR_BRANCO, COR_FUNDO,   1, "Back");
+    preenche(216, 200, 100, 36, COR_CRITICO); escreve(216, 208, 100, 20, FONTE_P, COR_BRANCO, COR_CRITICO, 1, "Cancel");
   }
 }
 
-void abrePaleta() { corAntesPaleta = corRostoAtual; registra("cor: paleta aberta"); irPaleta(3); }
+void abrePaleta() { corAntesPaleta = corRostoAtual; registra("color: palette opened"); irPaleta(3); }
 void cancelaPaleta(const char* porque) {
-  corRostoAtual = corAntesPaleta; registra("cor: cancelada (%s)", porque); voltaRepouso();
+  corRostoAtual = corAntesPaleta; registra("color: cancelled (%s)", porque); voltaRepouso();
 }
-void gravaCor(uint16_t cor) {
-  corRostoAtual = cor;
-  prefs.begin("claudinho", false); prefs.putUShort("cor", cor); prefs.end();
-  registra("cor: gravada 0x%04X", cor);
-}
-
 // Toque (soltou) em uma das telas da paleta.
 void toquePaleta(int tx, int ty) {
   if (pagina == 3) { paletaBase = min(1, ty / 120) * 3 + min(2, tx / 106); paletaTom = -1; irPaleta(4); }
@@ -841,7 +992,7 @@ void toquePaleta(int tx, int ty) {
   else if (ty >= 192) {
     if (tx < 107)      { gravaCor(corRostoAtual); voltaRepouso(); }
     else if (tx < 213) irPaleta(4);
-    else               cancelaPaleta("botao");
+    else               cancelaPaleta("button");
   }
 }
 
@@ -893,14 +1044,14 @@ void vCentro(int i, int& cx, int& cy) { cx = VX + (i % 3) * VC + VC / 2; cy = VY
 void vDesenhaPeca(int i) {
   int cx, cy; vCentro(i, cx, cy); const int r = 22;
   if (vTab[i] == 1) for (int d = -2; d <= 2; d++) {            // X preto grosso
-    nexCmdf("line %d,%d,%d,%d,%u", cx - r + d, cy - r, cx + r + d, cy + r, COR_OLHO);
-    nexCmdf("line %d,%d,%d,%d,%u", cx + r + d, cy - r, cx - r + d, cy + r, COR_OLHO);
+    linhaFina(cx - r + d, cy - r, cx + r + d, cy + r, COR_OLHO);
+    linhaFina(cx + r + d, cy - r, cx - r + d, cy + r, COR_OLHO);
   } else if (vTab[i] == 2) for (int d = 0; d < 5; d++)         // O branco grosso
-    nexCmdf("cir %d,%d,%d,%u", cx, cy, r - d, COR_BRANCO);
+    circuloVazio(cx, cy, r - d, COR_BRANCO);
 }
 void vDesenhaAviso() {
   if (vAviso) { escreve(0, 90, VX, 18, FONTE_P, COR_CRITICO, corRosto(), 1, "Claude");
-                escreve(0, 110, VX, 18, FONTE_P, COR_CRITICO, corRosto(), 1, "chama!"); }
+                escreve(0, 110, VX, 18, FONTE_P, COR_CRITICO, corRosto(), 1, "waits!"); }
 }
 void vDesenhaTabuleiro() {
   limpaTela(corRosto());
@@ -917,16 +1068,16 @@ void vNovaPartida() {
   const float ERROS[3] = {0.0f, 0.25f, 0.5f}; vErro = ERROS[random(3)];
   vDesenhaTabuleiro();
   vJogaEm = vVoceComeca ? 0 : millis() + VELHA_PENSA_MS;
-  registra("velha: nova partida (erro %d%%, %s comeca)", (int)(vErro * 100), vVoceComeca ? "voce" : "Claudinho");
+  registra("tic-tac-toe: new game (error chance %d%%, %s starts)", (int)(vErro * 100), vVoceComeca ? "you" : "Claudinho");
 }
 void vFimDePartida(int r) {
   vResultado = r; vJogaEm = 0; vFimEm = millis(); vVoceComeca = !vVoceComeca;
   for (auto& l : LINHAS3) if (r != 3 && vTab[l[0]] == r && vTab[l[1]] == r && vTab[l[2]] == r) {   // risca a vitoria
     int x1, y1, x2, y2; vCentro(l[0], x1, y1); vCentro(l[2], x2, y2);
-    for (int d = -2; d <= 2; d++) { nexCmdf("line %d,%d,%d,%d,%u", x1 + d, y1, x2 + d, y2, COR_CRITICO); nexCmdf("line %d,%d,%d,%d,%u", x1, y1 + d, x2, y2 + d, COR_CRITICO); }
+    for (int d = -2; d <= 2; d++) { linhaFina(x1 + d, y1, x2 + d, y2, COR_CRITICO); linhaFina(x1, y1 + d, x2, y2 + d, COR_CRITICO); }
     break;
   }
-  registra("velha: %s", r == 1 ? "voce ganhou" : r == 2 ? "Claudinho ganhou" : "empate");
+  registra("tic-tac-toe: %s", r == 1 ? "you won" : r == 2 ? "Claudinho won" : "draw");
 }
 // Rosto reagindo ao resultado, na tela inteira, com uma palavra embaixo.
 void vDesenhaReacao() {
@@ -943,7 +1094,7 @@ void abreVelha() {
   mudaPagina(6); paginaDur = VELHA_ESPERA_MS; vNovaPartida();
 }
 void avisoVelha() { if (!vAviso) { vAviso = true; if (!vResultado) vDesenhaAviso(); } }
-void saiVelha(const char* porque) { registra("velha: saiu (%s)", porque); vJogaEm = 0; voltaRepouso(); }
+void saiVelha(const char* porque) { registra("tic-tac-toe: closed (%s)", porque); vJogaEm = 0; voltaRepouso(); }
 
 void toqueVelha(int tx, int ty) {
   paginaDesde = millis();                                          // renova o tempo de inatividade
@@ -951,7 +1102,7 @@ void toqueVelha(int tx, int ty) {
   int i = ((ty - VY) / VC) * 3 + (tx - VX) / VC;
   if (i == vUltCasa && millis() - vUltToque < VELHA_TRIPLO_MS) vToques++; else vToques = 1;
   vUltCasa = i; vUltToque = millis();
-  if (vToques >= 3) { saiVelha("3 toques"); return; }
+  if (vToques >= 3) { saiVelha("3 taps"); return; }
   if (vResultado || vJogaEm || vTab[i]) return;                    // fim de partida, vez dele, ou casa ocupada
   vTab[i] = 1; vDesenhaPeca(i);
   int r = vVencedor(vTab);
@@ -995,7 +1146,7 @@ void gQuadrante(int q, bool aceso) {
 }
 void gCentro() {                                               // rodada no circulo do meio
   char t[8]; snprintf(t, sizeof t, "%d", gLen);
-  nexCmdf("cirs 160,120,26,%u", COR_OLHO);
+  circulo(160, 120, 26, COR_OLHO);
   escreve(136, 108, 48, 26, FONTE_M, COR_BRANCO, COR_OLHO, 1, t);
 }
 void gDesenhaTudo() {
@@ -1009,13 +1160,13 @@ void gNovaRodada() {
   gFase = 0; gIdx = 0; gAceso = -1; gProx = millis() + G_PAUSA_RODADA_MS;
   gCentro();
 }
-void gNovoJogo() { gLen = 0; gAcesoJ = -1; gDesenhaTudo(); gNovaRodada(); registra("genius: novo jogo"); }
+void gNovoJogo() { gLen = 0; gAcesoJ = -1; gDesenhaTudo(); gNovaRodada(); registra("genius: new game"); }
 void abreGenius() { gUltQ = -1; gToques = 0; mudaPagina(7); paginaDur = VELHA_ESPERA_MS; gNovoJogo(); }
-void saiGenius(const char* porque) { registra("genius: saiu (%s)", porque); voltaRepouso(); }
+void saiGenius(const char* porque) { registra("genius: closed (%s)", porque); voltaRepouso(); }
 void gPlacar() {
   int pontos = gLen - 1;
   gFase = 2; gFimEm = millis();
-  registra("genius: errou, %d pontos", pontos);
+  registra("genius: wrong answer, %d points", pontos);
   Cara c = pontos >= 8 ? C_EMPOLGADO : pontos >= 4 ? C_FELIZ : C_DESCONFIADO;
   char t[20]; snprintf(t, sizeof t, "Score: %d", pontos);
   limpaTela(corRosto());
@@ -1031,7 +1182,7 @@ void toqueGenius(int tx, int ty) {
   if (!certo) {                                                  // so toque fora de hora conta para sair
     if (q == gUltQ && millis() - gUltToque < VELHA_TRIPLO_MS) gToques++; else gToques = 1;
     gUltQ = q; gUltToque = millis();
-    if (gToques >= 3) { saiGenius("3 toques"); return; }
+    if (gToques >= 3) { saiGenius("3 taps"); return; }
     if (gFase == 1) gPlacar();                                   // errou a sequencia
     return;
   }
@@ -1052,6 +1203,7 @@ void cuidaGenius() {
   gFase = 1; gIdx = 0;                                           // sua vez
 }
 
+#endif
 // ---------------------------------------------------------------- impressora Bambu (opcional)
 // Desligado ate a pessoa configurar (claudinho.sh bambu IP; o codigo de acesso
 // LAN fica gravado na placa). O Claudinho conecta direto no MQTT da propria
@@ -1102,7 +1254,7 @@ void novoAlerta(uint8_t tipo, uint16_t cor, const char* titulo, const char* l1, 
   strlcpy(a->titulo, titulo, sizeof a->titulo); strlcpy(a->l2, l2, sizeof a->l2); a->codigo[0] = 0;
   strlcpy(a->l1, l1 == bi.nome ? "" : l1, sizeof a->l1);   // o nome da impressao esta errado (projeto + placa): fica de fora
   a->hora[0] = 0; if (relogioValido()) horaStr(time(nullptr), a->hora, sizeof a->hora);
-  registra("bambu: alerta %s (%s)", titulo, l2);
+  registra("bambu: alert %s (%s)", titulo, l2);
   if (pagina == 8 && (a == &aFila[0] || cabecaMudou)) abreAlerta();   // o que esta na tela mudou
 }
 void desenhaAlerta() {
@@ -1111,7 +1263,7 @@ void desenhaAlerta() {
   const Alerta& a = aFila[0];
   char t[64];
   // cabecalho: de onde vem, e um traco na cor do alerta
-  escreve(12, 6, 180, 28, FONTE_M, COR_TEXTO, COR_FUNDO, 0, "IMPRESSORA 3D");
+  escreve(12, 6, 180, 28, FONTE_M, COR_TEXTO, COR_FUNDO, 0, "3D PRINTER");
   escreve(190, 10, 118, 20, FONTE_P, COR_APAGADO, COR_FUNDO, 2, bi.modelo[0] ? bi.modelo : "Bambu Lab");
   preenche(0, 38, 320, 3, a.cor);
   bool grande = strlen(a.titulo) <= 12;
@@ -1130,14 +1282,18 @@ void desenhaAlerta() {
   }
   // embaixo: o Claudinho (pula ou abana os bracos), a hora, o "toque: li" e o codigo
   alertaMini(0);
-  if (a.hora[0]) { snprintf(t, sizeof t, "\xe0s %s", a.hora); escreve(110, 178, 200, 20, FONTE_P, COR_APAGADO, COR_FUNDO, 1, t); }
-  const char* acao = a.fixo ? "toque: li" : "sai sozinho";
-  if (aN > 1) snprintf(t, sizeof t, "%s  (mais %d)", acao, aN - 1); else strcpy(t, acao);
+  if (a.hora[0]) { snprintf(t, sizeof t, "at %s", a.hora); escreve(110, 178, 200, 20, FONTE_P, COR_APAGADO, COR_FUNDO, 1, t); }
+#if DISPLAY_GC9A01
+  const char* acao = a.fixo ? "BOOT: dismiss" : "auto-dismiss";
+#else
+  const char* acao = a.fixo ? "tap: dismiss" : "auto-dismiss";
+#endif
+  if (aN > 1) snprintf(t, sizeof t, "%s  (%d more)", acao, aN - 1); else strcpy(t, acao);
   escreve(110, 200, 200, 20, FONTE_P, COR_OURO, COR_FUNDO, 1, t);
   if (a.codigo[0]) escreve(110, 222, 200, 18, FONTE_P, COR_TRILHO, COR_FUNDO, 1, a.codigo);
 }
 void toqueAlerta() {
-  if (aN) { registra("bambu: alerta lido (%s)", aFila[0].titulo); memmove(aFila, aFila + 1, sizeof(Alerta) * (A_MAX - 1)); aN--; }
+  if (aN) { registra("bambu: alert dismissed (%s)", aFila[0].titulo); memmove(aFila, aFila + 1, sizeof(Alerta) * (A_MAX - 1)); aN--; }
   if (aN) abreAlerta(); else voltaRepouso();
 }
 // Mostra o proximo alerta quando a tela esta no rosto, no painel ou no consumo automatico.
@@ -1147,69 +1303,69 @@ void cuidaAlertas() {
 
 const char* motivoPausa(int stg) {
   switch (stg) {
-    case 5: case 30: return "pausa no G-code";
-    case 6:  return "acabou o filamento";
-    case 16: return "voc\xea pausou";
-    case 17: return "tampa frontal caiu";
-    case 20: return "temperatura do bico";
-    case 21: return "temperatura da mesa";
-    case 23: return "pulou passo";
-    case 26: return "perdeu o AMS";
-    case 27: return "ventoinha do bico lenta";
-    case 28: return "temperatura da c\xe2mara";
-    case 32: return "filamento enrolado no bico";
-    case 33: return "erro no cortador";
-    case 34: return "erro na 1\xaa camada";
-    case 35: return "bico entupido";
+    case 5: case 30: return "G-code pause";
+    case 6:  return "out of filament";
+    case 16: return "paused by you";
+    case 17: return "front cover detached";
+    case 20: return "nozzle temperature";
+    case 21: return "bed temperature";
+    case 23: return "lost steps";
+    case 26: return "AMS disconnected";
+    case 27: return "nozzle fan too slow";
+    case 28: return "chamber temperature";
+    case 32: return "filament stuck to nozzle";
+    case 33: return "cutter error";
+    case 34: return "first-layer error";
+    case 35: return "nozzle clogged";
   }
   return nullptr;
 }
 bool imprimindoEm(const char* e) { return !strcmp(e, "RUNNING") || !strcmp(e, "PAUSE") || !strcmp(e, "PREPARE"); }
 void duracao(unsigned long ms, char* t, size_t n) {
   unsigned long m = ms / 60000;
-  if (m >= 60) snprintf(t, n, "levou %luh%02lu", m / 60, m % 60); else snprintf(t, n, "levou %lu min", m);
+  if (m >= 60) snprintf(t, n, "took %luh%02lu", m / 60, m % 60); else snprintf(t, n, "took %lu min", m);
 }
-void codigoErro(uint32_t e, char* t, size_t n) { snprintf(t, n, "erro %04X_%04X", (unsigned)(e >> 16), (unsigned)(e & 0xFFFF)); }
+void codigoErro(uint32_t e, char* t, size_t n) { snprintf(t, n, "error %04X_%04X", (unsigned)(e >> 16), (unsigned)(e & 0xFFFF)); }
 
 // Compara o que chegou com o que havia antes. Primeiro dado depois de ligar: so aprende.
 void bDetecta(const char* antes, int restAntes) {
-  const char* e = bi.estado; char t[40];
+  const char* e = bi.estado; char t[64];
   if (antes[0] && strcmp(e, antes)) {
     bool era = imprimindoEm(antes), eh = imprimindoEm(e);
     if (!era && eh) {
       bInicioEm = millis(); b5min = false; bPausaPend = 0;
-      t[0] = 0; if (bi.restante > 0) snprintf(t, sizeof t, "previsto %dh%02d", bi.restante / 60, bi.restante % 60);
-      novoAlerta(A_GERAL, COR_OK, "Come\xe7ou", bi.nome, t, 0);
+      t[0] = 0; if (bi.restante > 0) snprintf(t, sizeof t, "estimate %dh%02d", bi.restante / 60, bi.restante % 60);
+      novoAlerta(A_GERAL, COR_OK, "Started", bi.nome, t, 0);
     } else if (!strcmp(e, "PAUSE")) {
       bPausaPend = millis();                                    // o motivo chega junto ou logo depois
     } else if (!strcmp(antes, "PAUSE") && eh) {
       if (bPausaPend) bPausaPend = 0;                           // pausa rapida: nem avisou
-      else novoAlerta(A_GERAL, COR_OK, "Retomou", bi.nome, "imprimindo de novo", 0);
+      else novoAlerta(A_GERAL, COR_OK, "Resumed", bi.nome, "printing again", 0);
     } else if (!strcmp(e, "FINISH") && era) {
       bPausaPend = 0; t[0] = 0;
       long agora = time(nullptr);                               // a hora da impressora vale mesmo depois de reiniciar
       if (bi.inicio > 1600000000L && relogioValido() && agora > bi.inicio) duracao((agora - bi.inicio) * 1000UL, t, sizeof t);
       else if (bInicioEm) duracao(millis() - bInicioEm, t, sizeof t);
-      novoAlerta(A_GERAL, COR_OK, "Terminou!", bi.nome, t, 0);
+      novoAlerta(A_GERAL, COR_OK, "Finished!", bi.nome, t, 0);
     } else if (!strcmp(e, "FAILED") && era) {
       bPausaPend = 0;
-      if (bi.erro == 0x0300400C) novoAlerta(A_GERAL, COR_ALERTA, "Cancelada", bi.nome, "impress\xe3o cancelada", 0);
-      else { if (bi.erro) codigoErro(bi.erro, t, sizeof t); else strcpy(t, "sem c\xf3" "digo de erro"); novoAlerta(A_GERAL, COR_CRITICO, "Falhou", bi.nome, t, 0); }
+      if (bi.erro == 0x0300400C) novoAlerta(A_GERAL, COR_ALERTA, "Cancelled", bi.nome, "print cancelled", 0);
+      else { if (bi.erro) codigoErro(bi.erro, t, sizeof t); else strcpy(t, "no error code"); novoAlerta(A_GERAL, COR_CRITICO, "Failed", bi.nome, t, 0); }
     }
   }
   if (!antes[0]) return;
   if (!strcmp(e, "RUNNING") && !b5min && bi.restante > 0 && bi.restante <= 5 && restAntes > 5) {
-    b5min = true; novoAlerta(A_GERAL, COR_OURO, "Faltam 5 min", bi.nome, "quase pronta", 0);
+    b5min = true; novoAlerta(A_GERAL, COR_OURO, "5 min left", bi.nome, "almost ready", 0);
   }
   // troca de filamento (255 = descarregando no meio da troca: ignora)
   if (bi.trayNow != 255) {
     if (bUltTray >= 0 && bi.trayNow != bUltTray && imprimindoEm(e)) {
-      char a[8], b[8];
-      if (bUltTray == 254) strcpy(a, "externo"); else snprintf(a, sizeof a, "slot %d", bUltTray + 1);
-      if (bi.trayNow == 254) strcpy(b, "externo"); else snprintf(b, sizeof b, "slot %d", bi.trayNow + 1);
+      char a[20], b[20];
+      if (bUltTray == 254) strcpy(a, "ext."); else snprintf(a, sizeof a, "slot %d", bUltTray + 1);
+      if (bi.trayNow == 254) strcpy(b, "ext."); else snprintf(b, sizeof b, "slot %d", bi.trayNow + 1);
       bool noAms = bi.trayNow >= 0 && bi.trayNow < 4;
       snprintf(t, sizeof t, "%s > %s%s%s", a, b, noAms && bi.tipo[bi.trayNow][0] ? "  " : "", noAms ? bi.tipo[bi.trayNow] : "");
-      novoAlerta(A_FILAMENTO, COR_AZUL, "Trocou o filamento", bi.nome, t, noAms ? bi.cor[bi.trayNow] : 0);
+      novoAlerta(A_FILAMENTO, COR_AZUL, "Filament changed", bi.nome, t, noAms ? bi.cor[bi.trayNow] : 0);
     }
     bUltTray = bi.trayNow;
   }
@@ -1217,8 +1373,8 @@ void bDetecta(const char* antes, int restAntes) {
 void bConfereUmidade() {
   if (bi.umid < 0) return;
   if (bi.umid >= 50 && !bUmidAvisada) {
-    bUmidAvisada = true; char t[40]; snprintf(t, sizeof t, "umidade %d%%", bi.umid);
-    novoAlerta(A_GERAL, COR_AZUL, "AMS \xfamido", "hora de secar o filamento", t, 0);
+    bUmidAvisada = true; char t[40]; snprintf(t, sizeof t, "humidity %d%%", bi.umid);
+    novoAlerta(A_GERAL, COR_AZUL, "AMS humid", "time to dry the filament", t, 0);
   } else if (bi.umid < 40) bUmidAvisada = false;
 }
 // HMS: a tabela gerada (hms_pt.h) da categoria, o nivel e uma frase curta em
@@ -1226,13 +1382,13 @@ void bConfereUmidade() {
 // categoria pela familia do codigo.
 const char* hmsCatFamilia(uint32_t at) {
   switch (at >> 24) {
-    case 0x03: return "Impressora";
-    case 0x05: return "Sistema";
+    case 0x03: return "Printer";
+    case 0x05: return "System";
     case 0x07: case 0x18: return "AMS";
-    case 0x0C: return "C\xe2mera / sensores";
-    case 0x29: return "C\xe2mara / filtro";
+    case 0x0C: return "Camera / sensors";
+    case 0x29: return "Chamber / filter";
   }
-  return "Aviso da impressora";
+  return "Printer notice";
 }
 void bConfereHms(JsonArray h) {
   uint32_t novo[8][2]; int n = 0;
@@ -1249,7 +1405,7 @@ void bConfereHms(JsonArray h) {
       static struct { uint32_t a, c; unsigned long em; } visto[6]; static int prox = 0;
       bool repetido = false;
       for (auto& v : visto) if (v.em && v.a == at && v.c == co && millis() - v.em < A_INFO_REPETE_MS) repetido = true;
-      if (repetido) { registra("bambu: %s repetido, ignorado", cod); continue; }
+      if (repetido) { registra("bambu: %s repeated, ignored", cod); continue; }
       visto[prox] = {at, co, millis()}; prox = (prox + 1) % 6;
     }
     const char* cat; const char* frase; char onde[32] = ""; uint16_t cor;
@@ -1262,7 +1418,7 @@ void bConfereHms(JsonArray h) {
       }
     } else {                                           // a Bambu inventou um codigo novo
       int sev = co >> 16;
-      cat = hmsCatFamilia(at); frase = "procure o c\xf3" "digo no wiki da Bambu";
+      cat = hmsCatFamilia(at); frase = "look up code in the Bambu wiki";
       cor = sev <= 2 ? COR_CRITICO : sev == 3 ? COR_ALERTA : COR_AZUL;
     }
     novoAlerta(A_GERAL, cor, cat, onde[0] ? onde : (bImprimindo() ? bi.nome : ""), frase, 0);
@@ -1298,13 +1454,13 @@ void bConecta() {
   static int falhas = 0;
   WiFiClient teste;                                    // impressora desligada: desiste em 1 s
   if (!teste.connect(bIp.c_str(), 8883, 1000)) {
-    if (falhas++ < 3) { bProxTentativa = millis() + 10000; registra("bambu: impressora nao responde, tento em 10 s"); }
+    if (falhas++ < 3) { bProxTentativa = millis() + 10000; registra("bambu: printer not responding, retry in 10 s"); }
     return;                                            // depois disso, 1 vez por minuto e em silencio
   }
   falhas = 0;
   teste.stop();
   bCli.setInsecure(); bCli.setHandshakeTimeout(8);
-  if (!bCli.connect(bIp.c_str(), 8883)) { registra("bambu: falha na conexao segura"); return; }
+  if (!bCli.connect(bIp.c_str(), 8883)) { registra("bambu: secure connection failed"); return; }
   String cid = "claudinho-" + macTexto(); cid.replace(":", "");
   uint8_t c[160]; size_t n = 0;
   const uint8_t var[] = {0, 4, 'M', 'Q', 'T', 'T', 4, 0xC2, 0, 60};
@@ -1336,7 +1492,8 @@ void bProcessa(const uint8_t* js, size_t n) {
   }
   JsonDocument d;
   if (deserializeJson(d, (const char*)js, n, DeserializationOption::Filter(filtro))) return;
-  for (JsonObject m : d["info"]["module"].as<JsonArray>())   // o modulo "ota" e a impressora
+  JsonArray modules = d["info"]["module"].as<JsonArray>();
+  for (JsonObject m : modules)   // o modulo "ota" e a impressora
     if (m["name"] == "ota" && m["product_name"].is<const char*>()) {
       strlcpy(bi.modelo, m["product_name"], sizeof bi.modelo);
       if (pagina == 9) painel(false);
@@ -1363,7 +1520,8 @@ void bProcessa(const uint8_t* js, size_t n) {
   if (!ams["tray_now"].isNull()) bi.trayNow = ams["tray_now"].as<String>().toInt();
   JsonArray un = ams["ams"];
   if (!un.isNull() && un.size()) {
-    for (JsonObject t : un[0]["tray"].as<JsonArray>()) {
+    JsonArray trays = un[0]["tray"].as<JsonArray>();
+    for (JsonObject t : trays) {
       int id = t["id"].as<String>().toInt();
       if (id < 0 || id > 3) continue;
       if (t["tray_color"].is<const char*>()) bi.cor[id] = strtoul(t["tray_color"], nullptr, 16);
@@ -1386,10 +1544,10 @@ void bPacote(const uint8_t* b, uint32_t n) {
       bConectado = true;
       uint8_t c[40]; size_t k = 0; c[k++] = 0; c[k++] = 1; bStr(c, k, "device/+/report"); c[k++] = 0;
       bEnvia(0x82, c, k);
-      registra("bambu: conectado (memoria livre %u)", (unsigned)ESP.getFreeHeap());
+      registra("bambu: connected (free memory %u)", (unsigned)ESP.getFreeHeap());
       bPushall();
     } else {
-      registra("bambu: codigo de acesso recusado"); bCli.stop(); bProxTentativa = millis() + 5 * B_TENTA_MS;
+      registra("bambu: access code rejected"); bCli.stop(); bProxTentativa = millis() + 5 * B_TENTA_MS;
     }
   } else if (tipo == 0x30 && n > 2) {                  // PUBLISH
     uint8_t qos = (bCab >> 1) & 3; uint16_t tl = (b[0] << 8) | b[1];
@@ -1399,7 +1557,7 @@ void bPacote(const uint8_t* b, uint32_t n) {
       if (i > 0 && f > i) {
         bSerial = t.substring(i + 1, f);
         prefs.begin("claudinho", false); prefs.putString("bambu_sn", bSerial); prefs.end();
-        registra("bambu: impressora %s", bSerial.c_str());
+        registra("bambu: printer %s", bSerial.c_str());
         bPushall();
       }
     }
@@ -1441,19 +1599,19 @@ void cuidaBambu() {
       const char* m = motivoPausa(bi.stg); char t[40];
       if (!m && bi.erro) { codigoErro(bi.erro, t, sizeof t); m = t; }
       bool voce = bi.stg == 16 || bi.stg == 5 || bi.stg == 30;
-      novoAlerta(A_GERAL, voce ? COR_ALERTA : COR_CRITICO, "Pausada", bi.nome, m ? m : "motivo desconhecido", 0);
+      novoAlerta(A_GERAL, voce ? COR_ALERTA : COR_CRITICO, "Paused", bi.nome, m ? m : "unknown reason", 0);
     }
   }
   cuidaAlertas();
   if (!bambuLigado() || WiFi.status() != WL_CONNECTED) return;
   if (!bCli.connected()) {
-    if (bConectado) { bConectado = false; bSolta(); registra("bambu: conexao caiu"); if (pagina == 9) painel(false); }
+    if (bConectado) { bConectado = false; bSolta(); registra("bambu: connection lost"); if (pagina == 9) painel(false); }
     if ((long)(millis() - bProxTentativa) >= 0) bConecta();
     return;
   }
   bLe();
   if (bConectado && millis() - bUltPing > B_PING_MS) { bEnvia(0xC0, nullptr, 0); bUltPing = millis(); }
-  if (millis() - bUltDado > B_SILENCIO_MS) { registra("bambu: sem resposta, reconectando"); bCli.stop(); }
+  if (millis() - bUltDado > B_SILENCIO_MS) { registra("bambu: no response, reconnecting"); bCli.stop(); }
   if (bConectado && bImprimindo() && pagina == 0 && millis() - bUltAuto > B_AUTO_MS) {   // painel a cada 5 min
     bUltAuto = millis(); abrePainel();
   }
@@ -1480,30 +1638,30 @@ void painel(bool tudo) {
     pBarraPct = -2; pAmsNow = -2; for (int i = 0; i < 4; i++) { pAmsCor[i] = 0xFFFFFFFF; pAmsTipo[i][0] = 1; pAmsTipo[i][1] = 0; }
   }
   char t[48];
-  const char* e = bi.estado; uint16_t ce = COR_APAGADO; const char* rot = "Aguardando...";
-  if (!bConectado) { rot = "Sem conex\xe3o"; ce = COR_CRITICO; }
-  else if (!strcmp(e, "RUNNING")) { rot = "Imprimindo"; ce = COR_OK; }
-  else if (!strcmp(e, "PAUSE"))   { rot = "Pausada"; ce = COR_ALERTA; }
-  else if (!strcmp(e, "PREPARE")) { rot = "Preparando"; ce = COR_OURO; }
-  else if (!strcmp(e, "FINISH"))  { rot = "Terminou"; ce = COR_OK; }
-  else if (!strcmp(e, "FAILED"))  { rot = "Falhou"; ce = COR_CRITICO; }
-  else if (!strcmp(e, "IDLE"))    { rot = "Ociosa"; }
-  pModelo.mostra(bi.modelo[0] ? bi.modelo : "Impressora", COR_TEXTO);
+  const char* e = bi.estado; uint16_t ce = COR_APAGADO; const char* rot = "Waiting...";
+  if (!bConectado) { rot = "Disconnected"; ce = COR_CRITICO; }
+  else if (!strcmp(e, "RUNNING")) { rot = "Printing"; ce = COR_OK; }
+  else if (!strcmp(e, "PAUSE"))   { rot = "Paused"; ce = COR_ALERTA; }
+  else if (!strcmp(e, "PREPARE")) { rot = "Preparing"; ce = COR_OURO; }
+  else if (!strcmp(e, "FINISH"))  { rot = "Finished"; ce = COR_OK; }
+  else if (!strcmp(e, "FAILED"))  { rot = "Failed"; ce = COR_CRITICO; }
+  else if (!strcmp(e, "IDLE"))    { rot = "Idle"; }
+  pModelo.mostra(bi.modelo[0] ? bi.modelo : "Printer", COR_TEXTO);
   pEstado.mostra(rot, ce);
   // (o nome da impressao saiu: o Bambu Studio manda "projeto + placa", que nao diz qual e a peca)
-  if (bi.umid >= 0 && bi.amsTemp > -100) snprintf(t, sizeof t, "AMS: umidade %d%%  \xb7  %d\xb0" "C", bi.umid, (int)lroundf(bi.amsTemp));
-  else if (bi.umid >= 0) snprintf(t, sizeof t, "AMS: umidade %d%%", bi.umid); else t[0] = 0;
+  if (bi.umid >= 0 && bi.amsTemp > -100) snprintf(t, sizeof t, "AMS: humidity %d%%  \xb7  %d\xb0" "C", bi.umid, (int)lroundf(bi.amsTemp));
+  else if (bi.umid >= 0) snprintf(t, sizeof t, "AMS: humidity %d%%", bi.umid); else t[0] = 0;
   pNome.mostra(t, bi.umid >= 50 ? COR_AZUL : COR_APAGADO);
   bool imp = bImprimindo();
-  pRot[0].mostra("impresso", COR_APAGADO);
+  pRot[0].mostra("printed", COR_APAGADO);
   if (bi.pct >= 0) snprintf(t, sizeof t, "%d%%", bi.pct); else strcpy(t, "--");
   pVal[0].mostra(t, COR_TEXTO);
-  pRot[1].mostra("faltam", COR_APAGADO);
+  pRot[1].mostra("left", COR_APAGADO);
   if (bi.restante > 0 && imp) {
     if (bi.restante >= 60) snprintf(t, sizeof t, "%dh%02d", bi.restante / 60, bi.restante % 60); else snprintf(t, sizeof t, "%d min", bi.restante);
   } else strcpy(t, "--");
   pVal[1].mostra(t, COR_TEXTO);
-  if (bi.camadas > 0) snprintf(t, sizeof t, "camada de %d", bi.camadas); else strcpy(t, "camada");
+  if (bi.camadas > 0) snprintf(t, sizeof t, "layer of %d", bi.camadas); else strcpy(t, "layer");
   pRot[2].mostra(t, COR_APAGADO);
   if (bi.camadas > 0) snprintf(t, sizeof t, "%d", bi.camada); else strcpy(t, "--");
   pVal[2].mostra(t, COR_TEXTO);
@@ -1515,9 +1673,9 @@ void painel(bool tudo) {
     preenche(12, 101, 296, 9, COR_TRILHO);
     if (pc > 0) preenche(12, 101, 296 * min(pc, 100) / 100, 9, cb);
   }
-  snprintf(t, sizeof t, "Bico %d/%d\xb0", (int)lroundf(bi.bico), (int)lroundf(bi.bicoAlvo)); pBico.mostra(t, COR_TEXTO);
-  snprintf(t, sizeof t, "Mesa %d/%d\xb0", (int)lroundf(bi.mesa), (int)lroundf(bi.mesaAlvo)); pMesa.mostra(t, COR_TEXTO);
-  if (bi.camara >= 0) snprintf(t, sizeof t, "C\xe2mara %d\xb0", bi.camara); else t[0] = 0;
+  snprintf(t, sizeof t, "Nozzle %d/%d\xb0", (int)lroundf(bi.bico), (int)lroundf(bi.bicoAlvo)); pBico.mostra(t, COR_TEXTO);
+  snprintf(t, sizeof t, "Bed %d/%d\xb0", (int)lroundf(bi.mesa), (int)lroundf(bi.mesaAlvo)); pMesa.mostra(t, COR_TEXTO);
+  if (bi.camara >= 0) snprintf(t, sizeof t, "Chamber %d\xb0", bi.camara); else t[0] = 0;
   pCamara.mostra(t, COR_TEXTO);
   // AMS: 4 slots; o que esta imprimindo ganha moldura branca
   if (!bi.temAms) return;
@@ -1529,7 +1687,7 @@ void painel(bool tudo) {
     preenche(x - 3, y - 3, 70, 44, atual ? COR_BRANCO : COR_FUNDO);
     uint16_t cs = bi.tipo[i][0] ? cor565(bi.cor[i]) : COR_BLOCO;
     preenche(x, y, 64, 38, cs);
-    escreve(x, y + 10, 64, 18, FONTE_P, corClara(bi.cor[i]) && bi.tipo[i][0] ? COR_OLHO : COR_BRANCO, cs, 1, bi.tipo[i][0] ? bi.tipo[i] : "vazio");
+    escreve(x, y + 10, 64, 18, FONTE_P, corClara(bi.cor[i]) && bi.tipo[i][0] ? COR_OLHO : COR_BRANCO, cs, 1, bi.tipo[i][0] ? bi.tipo[i] : "empty");
     pAmsCor[i] = bi.cor[i]; strlcpy(pAmsTipo[i], bi.tipo[i], 8);
   }
   pAmsNow = bi.trayNow;
@@ -1540,16 +1698,22 @@ static const int BT_Y = 186, BT_H = 50;   // alto: da para acertar com o dedo
 int nBotoes() { return bambuLigado() ? 3 : 2; }
 int botaoLarg() { return (308 - (nBotoes() - 1) * 6) / nBotoes(); }
 void desenhaBotoes() {
+#if DISPLAY_GC9A01
+  escreve(40, BT_Y + 8, 240, 24, FONTE_P, COR_OURO, COR_FUNDO, 1,
+           pagina == 1 && bambuLigado() ? "BOOT: printer" : "BOOT: back");
+  return;
+#else
   int n = nBotoes(), w = botaoLarg();
   for (int i = 0; i < n; i++) {
     int x = 6 + i * (w + 6);
     bool tela = i < n - 1;
-    const char* nome = !tela ? (manter ? "Dormir" : "Manter") : i == 0 ? "Tokens" : "Impressora";
+    const char* nome = !tela ? (manter ? "Sleep" : "Keep") : i == 0 ? "Usage" : "Printer";
     bool atual = tela && (i == 0 ? pagina == 1 : pagina == 9);
     preenche(x, BT_Y, w, BT_H, atual ? COR_OURO : COR_BLOCO);
     preenche(x + 1, BT_Y + 1, w - 2, BT_H - 2, COR_BLOCO);
     escreve(x + 1, BT_Y + 16, w - 2, 18, FONTE_P, COR_TEXTO, COR_BLOCO, 1, nome);
   }
+#endif
 }
 // Abre tokens (1) ou impressora (9); com Manter, fica ate tocar em Dormir.
 void abreTela(int p) {
@@ -1569,7 +1733,7 @@ void toqueTela(int tx, int ty) {
   int i = botaoEm(tx, ty);
   if (i < 0) { if (!manter) mudaPagina(0); return; }    // fora dos botoes: volta a dormir (mantida, nada)
   if (i == nBotoes() - 1) {
-    manter = !manter; registra("tela: %s", manter ? "mantida" : "dorme");
+    manter = !manter; registra("screen: %s", manter ? "kept open" : "sleep");
     if (!manter) { mudaPagina(0); return; }
     consumo.naTela = false; consumo.telaIntensa = false;   // o cartao automatico vira escolha da pessoa
     paginaManter = pagina; paginaDesde = millis(); paginaDur = B_FIXO; desenhaBotoes();
@@ -1635,31 +1799,31 @@ void miniOlhos(int dx) {             // -1 esquerda, 0 frente, 1 direita (lendo)
 #define CP "\x06"   // resto
 #define CT "\x07"   // tipo
 static const char* const CODIGO[] = {
-  CC "// acorda o Claudinho",
-  CT "void " CF "acorda" CP "() {",
+  CC "// wake up Claudinho",
+  CT "void " CF "wakeUp" CP "() {",
   CT "  int " CP "n = " CN "42" CP ";",
   CK "  if " CP "(n > " CN "0" CP ") {",
-  CP "    tela." CF "pisca" CP "(" CN "3" CP ");",
-  CF "    fala" CP "(" CS "'oi!'" CP ");",
+  CP "    screen." CF "blink" CP "(" CN "3" CP ");",
+  CF "    say" CP "(" CS "'hi!'" CP ");",
   CP "  }",
   CK "  for " CP "(" CT "int " CP "i = " CN "0" CP "; i < n; i++)",
-  CP "    olho[i] = " CK "true" CP ";",
+  CP "    eye[i] = " CK "true" CP ";",
   CP "}",
   "",
-  CC "// quanto custa? nada.",
+  CC "// cost? nothing.",
   CT "int " CF "tokens" CP "() {",
   CK "  return " CN "0" CP ";",
   CP "}",
   "",
-  CT "bool " CF "feliz" CP "(" CT "int " CP "humor) {",
-  CK "  while " CP "(humor < " CN "10" CP ")",
-  CP "    humor += " CF "cafe" CP "();",
+  CT "bool " CF "happy" CP "(" CT "int " CP "mood) {",
+  CK "  while " CP "(mood < " CN "10" CP ")",
+  CP "    mood += " CF "coffee" CP "();",
   CK "  return true" CP ";",
   CP "}",
   "",
-  CC "/* TODO: dominar o mundo */",
+  CC "/* TODO: rule the world */",
   CT "void " CF "loop" CP "() {",
-  CF "  acorda" CP "();",
+  CF "  wakeUp" CP "();",
   CF "  delay" CP "(" CN "10" CP ");",
   CP "}",
   "",
@@ -1753,16 +1917,16 @@ static const char* const TERM[] = {
   "$ping -c 2 claudinho.local",
   "64 bytes: time=3.1 ms",
   "64 bytes: time=2.8 ms",
-  "$./testes.sh",
-  "rosto ......... ok",
-  "painel ........ ok",
-  "velha ......... ok",
+  "$./tests.sh",
+  "face .......... ok",
+  "dashboard ..... ok",
+  "tic-tac-toe ... ok",
   "12 passed, 0 failed",
   "$clear",
   "$make upload",
   "Uploading 1246409 bytes",
   "[##########] 100%",
-  "Done. Claudinho acordou.",
+  "Done. Claudinho is awake.",
   "$uptime",
   "up 42 days, load 0.01",
   "$clear",
@@ -1866,13 +2030,13 @@ void mxPasso() {
 
 // ---- organograma: o Claude em cima, os agentes surgindo embaixo
 static const int AG_CX[3] = {52, 160, 268}, AG_Y = 126;
-int agN = 0, agPulo = 0; unsigned long agPuloAte = 0;
+int agN = 0; unsigned long agPuloAte = 0;
 uint16_t agCorBloco() { return RGB565(0x42, 0x40, 0x41); }
 void agCaixa(int i) {
   int cx = AG_CX[i];
   preenche(cx - 1, 98, 3, AG_Y - 98, COR_OURO);
   preenche(cx - 46, AG_Y, 92, 44, COR_OURO); preenche(cx - 44, AG_Y + 2, 88, 40, agCorBloco());
-  char t[16]; snprintf(t, sizeof t, "agente %d", agN > 3 && i == 2 ? agN : i + 1);
+  char t[24]; snprintf(t, sizeof t, "agent %d", agN > 3 && i == 2 ? agN : i + 1);
   escreve(cx - 44, AG_Y + 6, 88, 16, FONTE_P, COR_TEXTO, agCorBloco(), 1, t);
 }
 void agMini(int dy) { preenche(132, 12, MINI_W, MINI_H + 8, COR_FUNDO); miniClawd(132, 16 + dy, COR_FUNDO); }
@@ -1887,7 +2051,7 @@ void agInicio() {
   agMini(0);
   escreve(0, 56, 320, 18, FONTE_P, COR_TEXTO, COR_FUNDO, 1, "Claude");
   preenche(159, 76, 3, 20, COR_OURO);
-  escreve(0, 204, 320, 20, FONTE_P, COR_OURO, COR_FUNDO, 1, "delegando");
+  escreve(0, 204, 320, 20, FONTE_P, COR_OURO, COR_FUNDO, 1, "delegating");
   agN = 0; agPuloAte = 0; novoAgente();
 }
 void agPasso() {
@@ -1957,19 +2121,38 @@ bool cenaPorFerramenta(bool forca) {   // forca: teste (claudinho.sh cena) troca
 bool manutLiberada() { return manutAte && (long)(millis() - manutAte) < 0; }
 void liberaManutencao(const char* como) {
   manutPedidaEm = 0; manutAte = millis() + MANUT_JANELA_MS;
-  registra("manutencao: liberada por %s (%lu s)", como, MANUT_JANELA_MS / 1000);
+  registra("maintenance: allowed by %s (%lu s)", como, MANUT_JANELA_MS / 1000);
   limpaTela(COR_FUNDO);
-  escreve(0,  80, 320, 38, FONTE_32, COR_OK,    COR_FUNDO, 1, "Liberado!");
-  escreve(0, 130, 320, 30, FONTE_M,  COR_TEXTO, COR_FUNDO, 1, "recebendo...");
+  escreve(0,  80, 320, 38, FONTE_32, COR_OK,    COR_FUNDO, 1, "Allowed!");
+  escreve(0, 130, 320, 30, FONTE_M,  COR_TEXTO, COR_FUNDO, 1, "receiving...");
 }
 void cuidaManutencao() {
   if (!manutPedidaEm) return;
-  if (digitalRead(BOTAO_BOOT) == LOW) { liberaManutencao("botao"); return; }
-  if (millis() - manutPedidaEm > MANUT_PEDIDO_MS) { manutPedidaEm = 0; registra("manutencao: ninguem tocou; cancelada"); voltaRepouso(); }
+  if (digitalRead(BOTAO_BOOT) == LOW) { liberaManutencao("button"); return; }
+  if (millis() - manutPedidaEm > MANUT_PEDIDO_MS) { manutPedidaEm = 0; registra("maintenance: no confirmation; cancelled"); voltaRepouso(); }
 }
 
 // ---------------------------------------------------------------- toque
 void leToque() {
+#if DISPLAY_GC9A01
+  static int anterior = HIGH;
+  static unsigned long pressaoEm = 0;
+  int agora = digitalRead(BOTAO_BOOT);
+  if (agora == anterior) return;
+  anterior = agora;
+  if (agora == LOW) {
+    pressaoEm = millis();
+    if (manutPedidaEm) { liberaManutencao("button"); pressaoEm = 0; }
+    return;
+  }
+  if (!pressaoEm || millis() - pressaoEm < 30) { pressaoEm = 0; return; }
+  pressaoEm = 0;
+  registra("BOOT button (page %d)", pagina);
+  if (pagina == 8) { toqueAlerta(); return; }
+  if (pagina == 0 || pagina == 10) { abreTela(1); return; }
+  if (pagina == 1 && bambuLigado()) { abreTela(9); return; }
+  voltaRepouso();
+#else
   static uint8_t buf[9]; static int n = 0; static unsigned long pressaoEm = 0;
   while (nex.available()) {
     uint8_t b = nex.read();
@@ -1979,23 +2162,25 @@ void leToque() {
     n = 0;
     if (buf[6] != 0xFF || buf[7] != 0xFF || buf[8] != 0xFF) continue;
     int tx = (buf[1] << 8) | buf[2], ty = (buf[3] << 8) | buf[4];
-    registra("toque %s em %d,%d (pagina %d)", buf[5] == 1 ? "press" : "solta", tx, ty, pagina);
+    registra("touch %s at %d,%d (page %d)", buf[5] == 1 ? "press" : "release", tx, ty, pagina);
     if (buf[5] == 1) { pressaoEm = millis(); continue; }
-    if (manutPedidaEm) { liberaManutencao("toque"); continue; }
+    if (manutPedidaEm) { liberaManutencao("touch"); continue; }
     if (pagina == 6) { toqueVelha(tx, ty); continue; }
     if (pagina == 7) { toqueGenius(tx, ty); continue; }
     if (pagina == 8) { toqueAlerta(); continue; }
     if (pagina >= 3 && pagina <= 5) { toquePaleta(tx, ty); continue; }
-    if (millis() - pressaoEm >= TOQUE_LONGO_MS) { brilhoAlto = !brilhoAlto; registra("brilho %s", brilhoAlto ? "alto" : "baixo"); }
+    if (millis() - pressaoEm >= TOQUE_LONGO_MS) { brilhoAlto = !brilhoAlto; registra("brightness %s", brilhoAlto ? "high" : "low"); }
     else if (pagina == 1 || pagina == 9) toqueTela(tx, ty);            // botoes do rodape
-    else { mudaPagina(pagina == 0 || pagina == 10 ? 1 : 0); Serial.printf("-> pagina %d\n", pagina); }
+    else { mudaPagina(pagina == 0 || pagina == 10 ? 1 : 0); Serial.printf("-> page %d\n", pagina); }
   }
+#endif
 }
 
 // ---------------------------------------------------------------- gravar .tft no Nextion
 // Protocolo de upload do Nextion (v1.2): "whmi-wris <tam>,<baud>,1", depois
 // blocos de 4096 bytes, cada um confirmado com 0x05 (ou 0x08 + offset para
 // pular um trecho que o Nextion ja tem igual).
+#if !DISPLAY_GC9A01
 static uint8_t tftBuf[TFT_BLOCO];
 
 long tftEsperaRetorno(uint32_t timeout) {
@@ -2020,9 +2205,9 @@ bool tftHandshake(long tamanho) {
   nexCmd(""); nexCmd("sleep=0"); nexCmd("connect"); delay(300);
   while (nex.available()) nex.read();
   nex.print(cmd); nex.write(0xFF); nex.write(0xFF); nex.write(0xFF); nex.flush();
-  if (tftEsperaRetorno(3000) == 0) { registra("tft: handshake ok a %d", NEXTION_BAUD_RAPIDO); return true; }
+  if (tftEsperaRetorno(3000) == 0) { registra("tft: handshake ok at %d", NEXTION_BAUD_RAPIDO); return true; }
   // 2) depois de um erro ("System Data Error") ele reinicia em 9600
-  registra("tft: sem resposta a %d, tentando 9600", NEXTION_BAUD_RAPIDO);
+  registra("tft: no response at %d, trying 9600", NEXTION_BAUD_RAPIDO);
   nex.updateBaudRate(9600); delay(100);
   nexCmd(""); nexCmd("connect"); delay(300);
   while (nex.available()) nex.read();
@@ -2030,9 +2215,10 @@ bool tftHandshake(long tamanho) {
   delay(50);
   nex.updateBaudRate(NEXTION_BAUD_RAPIDO);   // ele troca para o baud pedido no comando
   if (tftEsperaRetorno(5000) == 0) { registra("tft: handshake ok via 9600"); return true; }
-  registra("tft: Nextion nao respondeu em nenhum baud");
+  registra("tft: Nextion did not respond at either baud rate");
   return false;
 }
+#endif
 
 // ---------------------------------------------------------------- modo local (sem servidor)
 // O PC manda tudo direto para ca. Tudo aqui e do core do ESP32 (WebServer,
@@ -2040,6 +2226,116 @@ bool tftHandshake(long tamanho) {
 WebServer web(80);
 unsigned long ultimoLocal = 0;
 bool localRecente() { return ultimoLocal && millis() - ultimoLocal < 300000UL; }
+
+static const char DASHBOARD_HTML[] PROGMEM = R"HTML(<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="theme-color" content="#08110f">
+<title>Claudinho Status</title>
+<style>
+:root{color-scheme:dark;--bg:#07100e;--panel:#101c19;--line:#233832;--text:#e8f5ef;--muted:#8ca69d;--gold:#f6c95f;--green:#69dda5;--red:#ff776d;--blue:#70b7ff}
+*{box-sizing:border-box}body{margin:0;background:radial-gradient(circle at 15% 0,#15372c 0,transparent 38%),var(--bg);color:var(--text);font:15px/1.45 system-ui,-apple-system,Segoe UI,sans-serif}
+main{width:min(1100px,calc(100% - 28px));margin:0 auto;padding:34px 0 56px}header{display:flex;align-items:flex-start;justify-content:space-between;gap:20px;margin-bottom:24px}
+h1{font-size:clamp(27px,5vw,45px);line-height:1;margin:0 0 9px;letter-spacing:-.04em}h1 span{color:var(--gold)}p{margin:0;color:var(--muted)}
+.live{display:flex;align-items:center;gap:8px;border:1px solid var(--line);border-radius:999px;padding:8px 12px;background:#0d1815;white-space:nowrap}.dot{width:9px;height:9px;border-radius:50%;background:var(--green);box-shadow:0 0 14px var(--green)}
+.cards{display:grid;grid-template-columns:repeat(4,1fr);gap:12px}.card,.panel{background:linear-gradient(145deg,#12211d,#0d1815);border:1px solid var(--line);border-radius:18px;box-shadow:0 16px 45px #0004}
+.card{padding:18px}.label{font-size:12px;text-transform:uppercase;letter-spacing:.12em;color:var(--muted)}.value{font-size:22px;font-weight:730;margin-top:7px;overflow-wrap:anywhere}.sub{font-size:13px;color:var(--muted);margin-top:3px}
+.layout{display:grid;grid-template-columns:1.15fr .85fr;gap:14px;margin-top:14px}.panel{padding:20px}h2{font-size:18px;margin:0 0 15px}.details{display:grid;grid-template-columns:1fr 1fr;gap:1px;background:var(--line);border:1px solid var(--line);border-radius:12px;overflow:hidden}.detail{background:#0d1815;padding:12px}.detail b{display:block;margin-top:3px;font-size:16px}
+.usage{margin-top:17px}.usage-line{display:grid;grid-template-columns:78px minmax(0,1fr) 90px;align-items:center;gap:10px;margin-top:10px}.usage-line>b{text-align:right}.track{height:8px;border-radius:8px;background:#263630;overflow:hidden}.fill{height:100%;background:linear-gradient(90deg,var(--green),var(--gold));border-radius:inherit;transition:width .4s}.fill.hot{background:linear-gradient(90deg,var(--gold),var(--red))}
+#history{display:flex;flex-direction:column;gap:9px;max-height:420px;overflow:auto;padding-right:4px}.event{display:grid;grid-template-columns:72px 68px 1fr;gap:9px;align-items:center;border-bottom:1px solid var(--line);padding:0 0 9px}.time{font-variant-numeric:tabular-nums;color:var(--muted);font-size:13px}.tag{font-size:11px;font-weight:700;text-align:center;padding:4px 7px;border-radius:999px;background:#20382f;color:var(--green)}.tag.face{background:#332d1b;color:var(--gold)}
+.faces{display:grid;grid-template-columns:repeat(4,1fr);gap:10px}.face-card{border:1px solid var(--line);border-radius:14px;padding:13px;background:#0d1815}.face-card strong{display:block;color:var(--gold);margin-bottom:5px}.face-card small{display:block;color:var(--muted);min-height:38px}.face-card code{display:block;margin-top:8px;color:#afd3c5;font-size:11px;white-space:normal}
+.wide{margin-top:14px}.empty{color:var(--muted);padding:24px;text-align:center}footer{color:var(--muted);font-size:12px;margin-top:14px;text-align:right}
+.face-preview{display:block;max-width:100%;height:auto!important;aspect-ratio:1;border-radius:50%;margin:4px auto 14px;box-shadow:0 0 0 3px #263832;image-rendering:pixelated}.event canvas.face-preview{display:inline-block;margin:0;vertical-align:middle;flex-shrink:0}.history-expression{display:flex;align-items:center;gap:10px}
+@media(max-width:820px){.cards,.faces{grid-template-columns:repeat(2,1fr)}.layout{grid-template-columns:1fr}}@media(max-width:480px){main{width:min(100% - 18px,1100px);padding-top:22px}header{display:block}.live{width:max-content;margin-top:15px}.cards{grid-template-columns:1fr 1fr}.card{padding:14px}.value{font-size:18px}.faces{grid-template-columns:1fr}.event{grid-template-columns:58px 64px 1fr}.details{grid-template-columns:1fr}}
+</style>
+</head>
+<body><main>
+<header><div><h1>Claudinho <span>Status</span></h1><p>ESP32-C3 &middot; GC9A01 &middot; local dashboard</p></div><div class="live"><i class="dot"></i><span id="live">connecting …</span></div></header>
+<section class="cards">
+ <article class="card"><div class="label">Current face</div><div class="value" id="face">–</div><div class="sub" id="faceSub">waiting for data</div></article>
+ <article class="card"><div class="label">Screen</div><div class="value" id="screen">–</div><div class="sub" id="sessions">–</div></article>
+ <article class="card"><div class="label">Wi-Fi</div><div class="value" id="wifi">–</div><div class="sub" id="ip">–</div></article>
+ <article class="card"><div class="label">Free memory</div><div class="value" id="heap">–</div><div class="sub" id="uptime">–</div></article>
+</section>
+<section class="layout">
+ <article class="panel"><h2>Device status</h2><div class="details">
+  <div class="detail"><span class="label">Firmware</span><b id="version">–</b></div><div class="detail"><span class="label">Display</span><b id="display">–</b></div>
+  <div class="detail"><span class="label">PC connection</span><b id="pc">–</b></div><div class="detail"><span class="label">Last activity</span><b id="activity">–</b></div>
+ </div><div class="usage">
+  <div class="usage-line"><span>5 hours</span><div class="track"><div id="h5bar" class="fill"></div></div><b id="h5">–</b></div>
+  <div class="usage-line"><span>7 days</span><div class="track"><div id="d7bar" class="fill"></div></div><b id="d7">–</b></div>
+  <div class="usage-line"><span>Context</span><div class="track"><div id="ctxbar" class="fill"></div></div><b id="ctx">–</b></div>
+ </div></article>
+ <article class="panel"><h2>Recent commands and faces</h2><div id="history"><div class="empty">No events yet</div></div></article>
+</section>
+<section class="panel wide"><h2>What do the faces mean?</h2><div class="faces">
+ <div class="face-card"><strong>Neutral</strong><small>A session is open with no current action.</small><code>automatic</code></div>
+ <div class="face-card"><strong>Sleeping</strong><small>No recent status data, no session, or extended inactivity.</small><code>cara dormir / cara fim</code></div>
+ <div class="face-card"><strong>Happy</strong><small>A new Claude session has started.</small><code>cara inicio</code></div>
+ <div class="face-card"><strong>Thinking</strong><small>A request is being processed.</small><code>cara prompt</code></div>
+ <div class="face-card"><strong>Excited</strong><small>Positive feedback such as “thanks” or “perfect”.</small><code>cara prompt feliz</code></div>
+ <div class="face-card"><strong>Worried</strong><small>The message mentions errors or problems.</small><code>cara prompt preocupado</code></div>
+ <div class="face-card"><strong>Startled</strong><small>A strongly worded message was detected.</small><code>cara prompt susto</code></div>
+ <div class="face-card"><strong>Working</strong><small>Claude is using a tool.</small><code>cara ferramenta</code></div>
+ <div class="face-card"><strong>Suspicious</strong><small>Five consecutive tool calls.</small><code>5 × cara ferramenta</code></div>
+ <div class="face-card"><strong>Angry</strong><small>A tool or work step has failed.</small><code>cara erro</code></div>
+ <div class="face-card"><strong>Waiting for you</strong><small>Claude needs an answer or permission.</small><code>cara atencao</code></div>
+ <div class="face-card"><strong>Dizzy</strong><small>The conversation context is being compacted.</small><code>cara compact</code></div>
+ <div class="face-card"><strong>Done</strong><small>Claude has finished the response.</small><code>cara parou</code></div>
+ <div class="face-card"><strong>Tired</strong><small>5-hour usage exceeds 75%.</small><code>automatic</code></div>
+ <div class="face-card"><strong>Sweating</strong><small>5-hour usage exceeds 90%.</small><code>automatic</code></div>
+ <div class="face-card"><strong>Sad</strong><small>An internal state, for example a game result.</small><code>internal</code></div>
+ </div></section>
+<footer>Refreshes every 3 seconds &middot; Local Wi-Fi only</footer>
+</main><script src="/faces.js?v=3"></script><script>
+const $=id=>document.getElementById(id);
+const duration=s=>{s=Math.max(0,Number(s)||0);const d=Math.floor(s/86400),h=Math.floor(s%86400/3600),m=Math.floor(s%3600/60);return d?`${d} d ${h} h`:h?`${h} h ${m} min`:`${m} min`};
+const age=s=>s<0?'never':s<5?'just now':s<60?`${s} s ago`:`${duration(s)} ago`;
+function usage(id,v){const available=typeof v==='number'&&Number.isFinite(v)&&v>=0;v=available?Math.max(0,Math.min(100,v)):0;$(id).textContent=available?`${v}%`:'Unavailable';const b=$(id+'bar');b.style.width=v+'%';b.classList.toggle('hot',available&&v>=75)}
+function renderHistory(items,now){const box=$('history');box.replaceChildren();if(!items.length){box.innerHTML='<div class="empty">No events yet</div>';return}items.slice().reverse().forEach(e=>{const row=document.createElement('div');row.className='event';const t=document.createElement('span');t.className='time';t.textContent=e.time>1700000000?new Date(e.time*1000).toLocaleTimeString('en-GB',{hour:'2-digit',minute:'2-digit',second:'2-digit'}):'+'+duration(e.uptime);const tag=document.createElement('span');tag.className='tag '+(e.kind==='Face'?'face':'');tag.textContent=e.kind;const text=document.createElement('span');text.textContent=e.text;const expression=document.createElement('span');expression.className='history-expression';if(e.kind==='Face'&&window.facePreview)expression.append(facePreview.history(e.text));expression.append(text);row.append(t,tag,expression);box.append(row)})}
+async function refresh(){try{const r=await fetch('/status.json',{cache:'no-store'});if(!r.ok)throw Error(r.status);const d=await r.json();if(window.facePreview)facePreview.update(d.face,d.face_color);$('live').textContent='online';document.querySelector('.dot').style.background='var(--green)';$('face').textContent=d.face;$('faceSub').textContent=d.face_reason||'current expression';$('screen').textContent=d.screen;$('sessions').textContent=`${d.sessions} open session${d.sessions===1?'':'s'}`;$('wifi').textContent=`${d.rssi} dBm`;$('ip').textContent=d.ip;$('heap').textContent=Math.round(d.heap_free/1024)+' KB';$('uptime').textContent='running for '+duration(d.uptime_s);$('version').textContent=d.version;$('display').textContent=d.display;$('pc').textContent=d.pc_recent?'connected':'inactive';$('activity').textContent=age(d.last_pc_s);usage('h5',d.h5);usage('d7',d.d7);usage('ctx',d.context);renderHistory(d.history,d.now)}catch(e){$('live').textContent='Connection lost';document.querySelector('.dot').style.background='var(--red)'}}
+refresh();setInterval(refresh,3000);
+</script></body></html>)HTML";
+
+const char* seitenName() {
+  switch (pagina) {
+    case 0: return "Face";
+    case 1: return "Usage";
+    case 2: return "Maintenance";
+    case 3: case 4: case 5: return "Color picker";
+    case 6: return "Tic-Tac-Toe";
+    case 7: return "Genius";
+    case 8: return "Printer alert";
+    case 9: return "Printer status";
+    case 10: return "Work scene";
+    case 11: return "Notice";
+  }
+  return "Unknown";
+}
+
+const char* caraGrund(Cara c) {
+  switch (c) {
+    case C_DORMINDO: return "no recent status data";
+    case C_NEUTRO: return "ready";
+    case C_PENSANDO: return "processing a request";
+    case C_TRABALHANDO: return "tool active";
+    case C_ESPERANDO: return "answer or permission needed";
+    case C_TERMINOU: return "response finished";
+    case C_FELIZ: return "session started";
+    case C_EMPOLGADO: return "positive feedback";
+    case C_PREOCUPADO: return "problem detected";
+    case C_SUSTO: return "strong wording detected";
+    case C_ZONZO: return "compacting context";
+    case C_CANSADO: return "5-hour usage above 75%";
+    case C_SUANDO: return "5-hour usage above 90%";
+    case C_BRAVO: return "tool error";
+    case C_TRISTE: return "internal state";
+    case C_DESCONFIADO: return "many tool calls";
+  }
+  return "";
+}
 
 struct SessaoLocal { char id[12]; long visto; };
 SessaoLocal sessoesLocais[8];
@@ -2067,8 +2363,11 @@ bool autorizado() { return cfgToken.length() >= 16 && web.header("Authorization"
 // Com varios terminais mandando numeros: na mesma janela o uso so cresce; janela antiga
 // ainda vigente nao e trocada por valor atrasado de outro terminal.
 void mesclaJanela(int& pct, long& reseta, JsonVariant j, long agora) {
-  if (j.isNull()) return;
-  int np = (int)lroundf(j["usado_pct"].as<float>()); long nr = j["reseta_em"].as<long>();
+  if (!j["usado_pct"].is<float>()) { pct = -1; reseta = 0; return; }
+  float value = j["usado_pct"].as<float>();
+  if (!isfinite(value) || value < 0 || value > 100) { pct = -1; reseta = 0; return; }
+  int np = (int)lroundf(value); long nr = j["reseta_em"].as<long>();
+  if (nr > 0 && nr <= agora) { pct = -1; reseta = nr; return; }
   if (nr < reseta && reseta > agora) return;
   if (nr == reseta && np < pct) return;
   pct = np; reseta = nr;
@@ -2077,17 +2376,18 @@ void mesclaJanela(int& pct, long& reseta, JsonVariant j, long agora) {
 void recebeuLocal() { ultimoLocal = millis(); servidor = SRV_OK; }
 
 void webEstado() {
-  if (!autorizado()) { web.send(401, "text/plain", "segredo invalido\n"); return; }
+  if (!autorizado()) { web.send(401, "text/plain", "invalid device token\n"); return; }
   JsonDocument doc;
-  if (deserializeJson(doc, web.arg("plain"))) { web.send(400, "text/plain", "json invalido\n"); return; }
+  if (deserializeJson(doc, web.arg("plain"))) { web.send(400, "text/plain", "invalid JSON\n"); return; }
   if (!relogioValido()) ajustaRelogio(doc["enviado_em"].as<long>());
   long agora = time(nullptr);
   mesclaJanela(dados.h5, dados.h5r, doc["limites"]["cinco_horas"], agora);
   mesclaJanela(dados.d7, dados.d7r, doc["limites"]["sete_dias"], agora);
-  if (!doc["contexto"]["usado_pct"].isNull()) dados.ctx = (int)lroundf(doc["contexto"]["usado_pct"].as<float>());
+  float ctx = doc["contexto"]["usado_pct"].as<float>();
+  dados.ctx = doc["contexto"]["usado_pct"].is<float>() && isfinite(ctx) && ctx >= 0 && ctx <= 100 ? (int)lroundf(ctx) : -1;
   strlcpy(dados.mod, doc["modelo"] | "", sizeof dados.mod);
   marcaSessao(doc["sessao"] | "");
-  dados.n = contaSessoes(); dados.at = agora; dados.ok = true;
+  dados.n = contaSessoes(); dados.at = agora;
   if (dados.h5r > agora) renovou5 = false;
   if (dados.d7r > agora) renovou7 = false;
   confereLimites();
@@ -2095,36 +2395,112 @@ void webEstado() {
   web.send(200, "text/plain", "ok\n");
 }
 
+const char* eventLabel(const char* event) {
+  if (!strcmp(event, "inicio")) return "Session started";
+  if (!strcmp(event, "prompt")) return "Working";
+  if (!strcmp(event, "ferramenta")) return "Tool in use";
+  if (!strcmp(event, "erro")) return "Error";
+  if (!strcmp(event, "parou")) return "Completed";
+  if (!strcmp(event, "atencao")) return "Waiting for you";
+  if (!strcmp(event, "compact")) return "Compacting context";
+  if (!strcmp(event, "dormir")) return "Sleep";
+  if (!strcmp(event, "fim")) return "Session ended";
+  return nullptr;
+}
+const char* detailLabel(const char* detail) {
+  if (!strcmp(detail, "feliz")) return "Happy";
+  if (!strcmp(detail, "preocupado")) return "Concerned";
+  if (!strcmp(detail, "susto")) return "Startled";
+  if (!strcmp(detail, "codando")) return "Coding";
+  if (!strcmp(detail, "lendo")) return "Reading";
+  if (!strcmp(detail, "agente")) return "Agent";
+  if (!strcmp(detail, "terminal")) return "Terminal";
+  if (!strcmp(detail, "web")) return "Web";
+  return detail;
+}
+
 void webEvento() {
-  if (!autorizado()) { web.send(401, "text/plain", "segredo invalido\n"); return; }
+  if (!autorizado()) { web.send(401, "text/plain", "invalid device token\n"); return; }
   JsonDocument doc;
-  if (deserializeJson(doc, web.arg("plain"))) { web.send(400, "text/plain", "json invalido\n"); return; }
+  if (deserializeJson(doc, web.arg("plain"))) { web.send(400, "text/plain", "invalid JSON\n"); return; }
   const char* tipo = doc["tipo"] | ""; const char* humor = doc["humor"] | ""; const char* sessao = doc["sessao"] | "";
+  const char* title = eventLabel(tipo);
+  if (!title) { web.send(400, "text/plain", "unknown event\n"); return; }
   strlcpy(acaoEvento, doc["acao"] | "", sizeof acaoEvento); forcaCena = doc["forca"] | false;
   if (!strcmp(tipo, "fim")) tiraSessao(sessao); else marcaSessao(sessao);
   dados.n = contaSessoes();
   if (strcmp(tipo, "fim") != 0) dados.at = time(nullptr);   // atividade = sinal de vida
   recebeuLocal();
-  registra("local evento: %s %s%s (n=%d)", tipo, humor, acaoEvento, dados.n);
+  if (acaoEvento[0]) merkt("Command", "%s: %s", title, detailLabel(acaoEvento));
+  else if (humor[0]) merkt("Command", "%s (%s)", title, detailLabel(humor));
+  else merkt("Command", "%s", title);
+  registra("local event: %s %s%s (n=%d)", tipo, humor, acaoEvento, dados.n);
   trataEvento(tipo, humor);
   web.send(200, "text/plain", "ok\n");
 }
 
 void webRaiz() {
-  web.send(200, "application/json", "{\"claudinho\":true,\"versao\":\"" VERSAO "\"}\n");
+  web.sendHeader("Cache-Control", "no-store");
+  web.send_P(200, "text/html; charset=utf-8", DASHBOARD_HTML);
+}
+void webIdent() {
+  web.send(200, "application/json", "{\"claudinho\":true,\"versao\":\"" VERSAO "\",\"display\":\"" DISPLAY_NOME "\"}\n");
+}
+void webDashboardStatus() {
+  JsonDocument doc;
+  Cara c = caraDesejada();
+  doc["version"] = VERSAO;
+  doc["board"] = PLACA_NOME;
+  doc["display"] = DISPLAY_NOME;
+  doc["ip"] = WiFi.localIP().toString();
+  doc["rssi"] = (int)WiFi.RSSI();
+  doc["uptime_s"] = millis() / 1000;
+  doc["heap_free"] = ESP.getFreeHeap();
+  doc["heap_min"] = ESP.getMinFreeHeap();
+  doc["face"] = caraNome(c);
+  doc["face_color"] = corRosto();
+  doc["face_reason"] = caraGrund(c);
+  doc["screen"] = seitenName();
+  doc["sessions"] = contaSessoes();
+  doc["pc_recent"] = localRecente();
+  doc["last_pc_s"] = ultimoLocal ? (long)((millis() - ultimoLocal) / 1000) : -1;
+  if (dados.h5 >= 0) doc["h5"] = dados.h5; else doc["h5"] = nullptr;
+  if (dados.d7 >= 0) doc["d7"] = dados.d7; else doc["d7"] = nullptr;
+  if (dados.ctx >= 0) doc["context"] = dados.ctx; else doc["context"] = nullptr;
+  doc["model"] = dados.mod;
+  doc["now"] = (long)time(nullptr);
+  JsonArray h = doc["history"].to<JsonArray>();
+  int start = (historieKopf - historieAnzahl + HISTORIE_MAX) % HISTORIE_MAX;
+  for (int i = 0; i < historieAnzahl; i++) {
+    const HistorieEintrag& e = historie[(start + i) % HISTORIE_MAX];
+    JsonObject o = h.add<JsonObject>();
+    o["time"] = e.zeit; o["uptime"] = e.sekunden; o["kind"] = e.art; o["text"] = e.text;
+  }
+  String out; out.reserve(4096); serializeJson(doc, out);
+  web.sendHeader("Cache-Control", "no-store");
+  web.send(200, "application/json; charset=utf-8", out);
 }
 void webMini() {
-  if (!autorizado()) { web.send(401, "text/plain", "segredo invalido\n"); return; }
-  char buf[480];
-  snprintf(buf, sizeof buf, "{\"versao\":\"%s\",\"placa\":\"" PLACA_NOME "\",\"h5\":%d,\"h5r\":%ld,\"d7\":%d,\"d7r\":%ld,\"ctx\":%d,\"n\":%d,\"mod\":\"%s\",\"at\":%ld,\"now\":%ld,\"local\":%s,\"rssi\":%d,\"manut\":\"%s\",\"bambu\":%s,\"bcon\":%s,\"best\":\"%s\",\"bpct\":%d}\n",
-           VERSAO, dados.h5, dados.h5r, dados.d7, dados.d7r, dados.ctx, dados.n, dados.mod, dados.at, (long)time(nullptr), localRecente() ? "true" : "false", (int)WiFi.RSSI(),
-           manutPedidaEm ? "pedida" : manutLiberada() ? "liberada" : "",
-           bambuLigado() ? "true" : "false", bConectado ? "true" : "false", bi.estado, bi.pct);
-  web.send(200, "application/json", buf);
+  if (!autorizado()) { web.send(401, "text/plain", "invalid device token\n"); return; }
+  JsonDocument doc;
+  doc["versao"] = VERSAO; doc["placa"] = PLACA_NOME; doc["display"] = DISPLAY_NOME;
+  if (dados.h5 >= 0) doc["h5"] = dados.h5; else doc["h5"] = nullptr;
+  if (dados.d7 >= 0) doc["d7"] = dados.d7; else doc["d7"] = nullptr;
+  if (dados.ctx >= 0) doc["ctx"] = dados.ctx; else doc["ctx"] = nullptr;
+  doc["h5r"] = dados.h5r; doc["d7r"] = dados.d7r;
+  doc["n"] = contaSessoes(); doc["mod"] = dados.mod;
+  doc["at"] = dados.at; doc["now"] = (long)time(nullptr);
+  doc["local"] = localRecente(); doc["rssi"] = (int)WiFi.RSSI();
+  // These values are part of the existing CLI protocol.
+  doc["manut"] = manutPedidaEm ? "pedida" : manutLiberada() ? "liberada" : "";
+  doc["bambu"] = bambuLigado(); doc["bcon"] = bConectado;
+  doc["best"] = bi.estado; doc["bpct"] = bi.pct;
+  String out; serializeJson(doc, out);
+  web.send(200, "application/json", out);
 }
 
 void webLog() {
-  if (!autorizado()) { web.send(401, "text/plain", "segredo invalido\n"); return; }
+  if (!autorizado()) { web.send(401, "text/plain", "invalid device token\n"); return; }
   String s;
   if (logCheio) s.concat(logBuf + logPos, sizeof logBuf - logPos);
   s.concat(logBuf, logPos);
@@ -2132,58 +2508,74 @@ void webLog() {
 }
 
 void webCmd() {
-  if (!autorizado()) { web.send(401, "text/plain", "segredo invalido\n"); return; }
+  if (!autorizado()) { web.send(401, "text/plain", "invalid device token\n"); return; }
   JsonDocument doc;
-  if (deserializeJson(doc, web.arg("plain"))) { web.send(400, "text/plain", "json invalido\n"); return; }
+  if (deserializeJson(doc, web.arg("plain"))) { web.send(400, "text/plain", "invalid JSON\n"); return; }
   if (doc["cor"].is<JsonArray>()) {
     corRostoAtual = RGB565(doc["cor"][0].as<int>(), doc["cor"][1].as<int>(), doc["cor"][2].as<int>());
     if (doc["salvar"] | false) gravaCor(corRostoAtual);
     if (pagina == 0) mudaPagina(0);
+    merkt("Command", "Face color%s", (doc["salvar"] | false) ? " saved" : " tested");
   }
   // {"bambu":{"ip":"...","codigo":"..."}} liga a impressora; {"bambu":{"desligar":true}} desliga
   if (doc["bambu"].is<JsonObject>()) {
     JsonObject b = doc["bambu"];
     prefs.begin("claudinho", false);
-    if (b["desligar"] | false) { prefs.remove("bambu_ip"); prefs.remove("bambu_cod"); prefs.remove("bambu_sn"); bIp = ""; bCod = ""; bSerial = ""; registra("bambu: desligada"); }
+    if (b["desligar"] | false) { prefs.remove("bambu_ip"); prefs.remove("bambu_cod"); prefs.remove("bambu_sn"); bIp = ""; bCod = ""; bSerial = ""; registra("bambu: disabled"); merkt("Command", "Bambu printer disconnected"); }
     else if (b["ip"].is<const char*>() && b["codigo"].is<const char*>()) {
       bIp = b["ip"].as<const char*>(); bCod = b["codigo"].as<const char*>();
-      prefs.putString("bambu_ip", bIp); prefs.putString("bambu_cod", bCod); registra("bambu: configurada (%s)", bIp.c_str());
+      prefs.putString("bambu_ip", bIp); prefs.putString("bambu_cod", bCod); registra("bambu: configured (%s)", bIp.c_str());
+      merkt("Command", "Bambu printer configured");
     }
     prefs.end();
-    bCli.stop(); bConectado = false; bSolta(); bProxTentativa = 0; memset(&bi, 0, sizeof bi); bi.trayNow = 255;
+    bCli.stop(); bConectado = false; bSolta(); bProxTentativa = 0; bi = {};
     if (!bambuLigado() && paginaManter == 9) paginaManter = 1;       // sem impressora, mantem os tokens
     if (pagina == 9 && !bambuLigado()) voltaRepouso();
     else if (pagina == 1 || pagina == 9) desenhaBotoes();            // mudou o numero de botoes
   }
   // {"painel":true}: mostra o painel da impressora (fixo)
-  if ((doc["painel"] | false) && bambuLigado()) abreTela(9);
-  // {"genius":true}: abre o Genius
+  if ((doc["painel"] | false) && bambuLigado()) { merkt("Command", "Show printer status"); abreTela(9); }
+  // Jogos e paleta dependem de coordenadas de toque. No GC9A01 sem touch,
+  // mostramos uma explicacao curta; a cor exata continua funcionando.
+#if DISPLAY_GC9A01
+  if ((doc["genius"] | false) || (doc["velha"] | false) || (doc["paleta"] | false)) {
+    merkt("Command", "Touch feature requested");
+    pagina = 11; paginaDesde = millis(); paginaDur = 6000;
+    limpaTela(COR_FUNDO);
+    escreve(0, 72, 320, 30, FONTE_M, COR_OURO, COR_FUNDO, 1, "No touch controller");
+    escreve(0, 112, 320, 24, FONTE_P, COR_TEXTO, COR_FUNDO, 1, "Color: cor R G B salvar");
+    escreve(0, 148, 320, 20, FONTE_P, COR_APAGADO, COR_FUNDO, 1, "BOOT: back");
+  }
+#else
   if (doc["genius"] | false) abreGenius();
-  // {"velha":true}: abre o jogo da velha
   if (doc["velha"] | false) abreVelha();
-  // {"paleta":true}: abre a escolha de cor do rosto na tela
   if (doc["paleta"] | false) abrePaleta();
+#endif
   // {"alerta":"bom"|"ruim"|"filamento"}: alerta de exemplo da impressora (para ver a tela)
   if (doc["alerta"].is<const char*>()) {
     const char* k = doc["alerta"];
+    merkt("Command", "Printer alert: %s", !strcmp(k, "ruim") ? "Paused" : !strcmp(k, "filamento") ? "Filament change" : !strcmp(k, "hms") ? "HMS" : "Almost finished");
     const char* pc = "";
-    if (!strcmp(k, "ruim")) novoAlerta(A_GERAL, COR_CRITICO, "Pausada", pc, "acabou o filamento", 0);
-    else if (!strcmp(k, "filamento")) novoAlerta(A_FILAMENTO, COR_AZUL, "Trocou o filamento", pc, "slot 1 > slot 2  PLA", 0x898989FF);
+    if (!strcmp(k, "ruim")) novoAlerta(A_GERAL, COR_CRITICO, "Paused", pc, "out of filament", 0);
+    else if (!strcmp(k, "filamento")) novoAlerta(A_FILAMENTO, COR_AZUL, "Filament changed", pc, "slot 1 > slot 2  PLA", 0x898989FF);
     else if (!strcmp(k, "hms")) { JsonDocument h; JsonArray a = h.to<JsonArray>(); bHmsBase = true; bHmsN = 0;
       JsonObject o = a.add<JsonObject>(); o["attr"] = 0x05000200UL; o["code"] = 0x00020005UL; bConfereHms(a); }
-    else novoAlerta(A_GERAL, COR_OURO, "Faltam 5 min", pc, "quase pronta", 0);
+    else novoAlerta(A_GERAL, COR_OURO, "5 min left", pc, "almost ready", 0);
   }
   // {"manutencao":true}: pede o toque que libera /ota e /tft
   if (doc["manutencao"] | false) {
+    merkt("Command", "Firmware maintenance requested");
     manutPedidaEm = millis(); manutAte = 0;
-    registra("manutencao: pedida pelo PC; esperando toque");
+    registra("maintenance: requested by PC; waiting for confirmation");
     mudaPagina(2); paginaDur = MANUT_PEDIDO_MS + 1000;
   }
   // {"consumo":N}: mostra a tela de consumo agora por N segundos
   if (doc["consumo"].is<int>()) {
+    merkt("Command", "Show usage status");
     mudaPagina(1); paginaDur = constrain(doc["consumo"].as<int>(), 3, 120) * 1000UL; consumo.naTela = true;
   }
   bool reinicia = doc["reiniciar"] | false;
+  if (reinicia) merkt("Command", "Restart ESP32");
   web.send(200, "text/plain", "ok\n");
   if (reinicia) { delay(300); ESP.restart(); }
 }
@@ -2192,19 +2584,22 @@ void webCmd() {
 // uploadNegado vale so dentro de um envio; os finais (webOtaFim, webTftFim)
 // conferem de novo segredo, liberacao e se um arquivo comecou de verdade:
 // um POST vazio chega direto neles e nao pode reiniciar nada.
-bool uploadNegado = true, otaIniciado = false, tftIniciado = false;
+bool uploadNegado = true, otaIniciado = false;
+#if !DISPLAY_GC9A01
+bool tftIniciado = false;
+#endif
 bool negaFim(bool iniciado) {
-  if (!autorizado())     { web.send(401, "text/plain", "segredo invalido\n"); return true; }
-  if (!manutLiberada())  { web.send(403, "text/plain", "toque na tela do Claudinho para liberar\n"); return true; }
-  if (!iniciado)         { web.send(400, "text/plain", "nenhum arquivo recebido\n"); return true; }
+  if (!autorizado())     { web.send(401, "text/plain", "invalid device token\n"); return true; }
+  if (!manutLiberada())  { web.send(403, "text/plain", "press BOOT or tap the display to allow updates\n"); return true; }
+  if (!iniciado)         { web.send(400, "text/plain", "no file received\n"); return true; }
   return false;
 }
 void webOtaFim() {
   bool iniciado = otaIniciado; otaIniciado = false;
   if (negaFim(iniciado)) return;
   bool ok = !Update.hasError();
-  web.send(ok ? 200 : 500, "text/plain", ok ? "ok, reiniciando\n" : "falhou\n");
-  registra(ok ? "ota local: ok" : "ota local: falhou");
+  web.send(ok ? 200 : 500, "text/plain", ok ? "ok, restarting\n" : "failed\n");
+  registra(ok ? "local OTA: ok" : "local OTA: failed");
   delay(500);
   if (ok) ESP.restart(); else voltaRepouso();
 }
@@ -2214,8 +2609,8 @@ void webOtaDados() {
     uploadNegado = !autorizado() || !manutLiberada(); otaIniciado = !uploadNegado;
     if (uploadNegado) return;
     limpaTela(COR_FUNDO);
-    escreve(0,  80, 320, 38, FONTE_32, COR_OURO,    COR_FUNDO, 1, "Atualizando...");
-    escreve(0, 130, 320, 30, FONTE_M,  COR_APAGADO, COR_FUNDO, 1, "n\xe3o desligue");
+    escreve(0,  80, 320, 38, FONTE_32, COR_OURO,    COR_FUNDO, 1, "Updating...");
+    escreve(0, 130, 320, 30, FONTE_M,  COR_APAGADO, COR_FUNDO, 1, "do not power off");
     Update.begin(UPDATE_SIZE_UNKNOWN);
   } else if (u.status == UPLOAD_FILE_WRITE) {
     if (!uploadNegado) Update.write(u.buf, u.currentSize);
@@ -2227,7 +2622,7 @@ void webOtaDados() {
     if (!otaIniciado) return;
     otaIniciado = false;
     Update.abort();
-    registra("ota local: envio interrompido; repita");
+    registra("local OTA: upload interrupted; retry");
     voltaRepouso();
   }
 }
@@ -2236,20 +2631,21 @@ void webOtaDados() {
 // Os dados chegam do curl e vao para o Nextion em blocos de 4096 com ack.
 // Quando o Nextion pede "pulo" (trecho igual ja gravado), os bytes que
 // chegarem ate o offset pedido sao descartados.
+#if !DISPLAY_GC9A01
 long tftTam = 0, tftEnviado = 0, tftPular = 0; int tftFill = 0; bool tftOk = false;
 bool tftMandaBloco() {
   nex.write(tftBuf, tftFill); nex.flush();
   tftEnviado += tftFill; tftFill = 0;
   long ret = tftEsperaRetorno(10000);
-  if (ret < 0) { registra("tft local: sem confirmacao em %ld", tftEnviado); return false; }
-  if (ret > tftEnviado) { tftPular = ret - tftEnviado; tftEnviado = ret; registra("tft local: pulo para %ld", ret); }
+  if (ret < 0) { registra("local TFT: no acknowledgement at %ld", tftEnviado); return false; }
+  if (ret > tftEnviado) { tftPular = ret - tftEnviado; tftEnviado = ret; registra("local TFT: skip to %ld", ret); }
   return true;
 }
 void webTftFim() {
   bool iniciado = tftIniciado; tftIniciado = false;
   if (negaFim(iniciado)) return;
-  web.send(tftOk ? 200 : 500, "text/plain", tftOk ? "ok, reiniciando\n" : "falhou, reiniciando\n");
-  registra("tft local: %s (%ld de %ld)", tftOk ? "concluido" : "falhou", tftEnviado, tftTam);
+  web.send(tftOk ? 200 : 500, "text/plain", tftOk ? "ok, restarting\n" : "failed, restarting\n");
+  registra("local TFT: %s (%ld of %ld)", tftOk ? "completed" : "failed", tftEnviado, tftTam);
   delay(3000); ESP.restart();
 }
 void webTftDados() {
@@ -2261,8 +2657,8 @@ void webTftDados() {
     tftIniciado = !uploadNegado;
     if (uploadNegado) return;
     limpaTela(COR_FUNDO);
-    escreve(0,  86, 320, 30, FONTE_M, COR_OURO,    COR_FUNDO, 1, "Gravando a tela...");
-    escreve(0, 130, 320, 30, FONTE_M, COR_APAGADO, COR_FUNDO, 1, "n\xe3o desligue");
+    escreve(0,  86, 320, 30, FONTE_M, COR_OURO,    COR_FUNDO, 1, "Updating display...");
+    escreve(0, 130, 320, 30, FONTE_M, COR_APAGADO, COR_FUNDO, 1, "do not power off");
     delay(300);
     tftOk = tftHandshake(tftTam);
   } else if (u.status == UPLOAD_FILE_WRITE) {
@@ -2281,10 +2677,11 @@ void webTftDados() {
     // de gravacao; reinicia como no fim com falha (repetir o envio resolve).
     if (!tftIniciado) return;
     tftIniciado = false;
-    registra("tft local: envio interrompido em %ld de %ld; repita", tftEnviado, tftTam);
+    registra("local TFT: upload interrupted at %ld of %ld; retry", tftEnviado, tftTam);
     delay(3000); ESP.restart();
   }
 }
+#endif
 
 void iniciaLocal() {
   configTzTime(FUSO, NTP_1, NTP_2);          // relogio sem servidor
@@ -2292,15 +2689,20 @@ void iniciaLocal() {
   const char* cabecalhos[] = {"Authorization"};
   web.collectHeaders(cabecalhos, 1);
   web.on("/", HTTP_GET, webRaiz);
+  web.on("/faces.js", HTTP_GET, []() { web.sendHeader("Cache-Control", "no-cache"); web.send_P(200, "application/javascript; charset=utf-8", FACE_PREVIEW_JS); });
+  web.on("/ident.json", HTTP_GET, webIdent);
+  web.on("/status.json", HTTP_GET, webDashboardStatus);
   web.on("/mini.json", HTTP_GET, webMini);
   web.on("/log", HTTP_GET, webLog);
   web.on("/estado", HTTP_POST, webEstado);
   web.on("/evento", HTTP_POST, webEvento);
   web.on("/cmd", HTTP_POST, webCmd);
   web.on("/ota", HTTP_POST, webOtaFim, webOtaDados);
+#if !DISPLAY_GC9A01
   web.on("/tft", HTTP_POST, webTftFim, webTftDados);
+#endif
   web.begin();
-  registra("local: http://%s/ pronto", WiFi.localIP().toString().c_str());
+  registra("local: http://%s/ ready", WiFi.localIP().toString().c_str());
 }
 
 // ---------------------------------------------------------------- configuracao
@@ -2316,7 +2718,7 @@ String macTexto() { return WiFi.macAddress(); }
 
 void imprimeInfo() {
   JsonDocument d;                      // ArduinoJson escapa SSID com aspas ou barra
-  d["versao"] = VERSAO; d["placa"] = PLACA_NOME; d["mac"] = macTexto();
+  d["versao"] = VERSAO; d["placa"] = PLACA_NOME; d["display"] = DISPLAY_NOME; d["mac"] = macTexto();
   d["ip"] = WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString() : String("");
   d["wifi"] = cfgSsid.isEmpty() ? "sem config" : (WiFi.status() == WL_CONNECTED ? "conectado" : "sem conexao");
   d["ssid"] = cfgSsid; d["token"] = cfgToken.length() >= 16;
@@ -2376,7 +2778,7 @@ bool conectaWifi() {
   WiFi.setScanMethod(WIFI_ALL_CHANNEL_SCAN);
   WiFi.setSortMethod(WIFI_CONNECT_AP_BY_SIGNAL);
   WiFi.begin(cfgSsid.c_str(), cfgSenha.c_str());
-  registra("wifi: conectando a %s", cfgSsid.c_str());
+  registra("wifi: connecting to %s", cfgSsid.c_str());
   unsigned long t0 = millis();
   conectandoWifi = true;
   while (WiFi.status() != WL_CONNECTED && millis() - t0 < 20000) { delay(250); leSerialConfig(); }
@@ -2384,11 +2786,11 @@ bool conectaWifi() {
   if (WiFi.status() == WL_CONNECTED) {
     WiFi.setSleep(false);                    // de novo, ja conectado: economia de energia do radio desligada
     wifi_ps_type_t ps = WIFI_PS_NONE; esp_wifi_get_ps(&ps);
-    registra("wifi: %s (sinal %d dBm, canal %d, ponto %s, economia %s)", WiFi.localIP().toString().c_str(), WiFi.RSSI(),
-             WiFi.channel(), WiFi.BSSIDstr().c_str(), ps == WIFI_PS_NONE ? "desligada" : "LIGADA");
+    registra("wifi: %s (signal %d dBm, channel %d, access point %s, power saving %s)", WiFi.localIP().toString().c_str(), WiFi.RSSI(),
+             WiFi.channel(), WiFi.BSSIDstr().c_str(), ps == WIFI_PS_NONE ? "off" : "ON");
     return true;
   }
-  registra("wifi: falhou");
+  registra("wifi: failed");
   return false;
 }
 
@@ -2397,9 +2799,17 @@ void setup() {
   Serial.begin(115200);
   pinMode(BOTAO_BOOT, INPUT_PULLUP);
   delay(300);
-  Serial.println("\nclaudinho - monitor de tokens  versao " VERSAO);
+  Serial.println("\nclaudinho - status display  version " VERSAO);
   setenv("TZ", FUSO, 1); tzset();
 
+#if DISPLAY_GC9A01
+  SPI.begin(TFT_SCLK, -1, TFT_MOSI, TFT_CS);
+  tft.begin();
+  tft.setRotation(0);
+  tft.setSPISpeed(40000000);
+  tft.setTextWrap(false);
+  tft.fillScreen(COR_FUNDO);
+#else
   // Nextion acorda a 9600; pede a serial rapida e troca. Quando os dois ligam
   // juntos (ou depois de gravar um .tft) o Nextion leva ~1,5 s para ouvir:
   // espera, e manda o pedido duas vezes por garantia.
@@ -2419,6 +2829,7 @@ void setup() {
   // A troca de baud acima gera respostas de erro do Nextion (0x1A, 0x00 +
   // FF FF FF) antes do bkcmd=0 valer; descarta para nao virar ruido no log.
   delay(50); while (nex.available()) nex.read();
+#endif
   mudaPagina(0);
 
   carregaConfig();
@@ -2426,17 +2837,17 @@ void setup() {
   WiFi.mode(WIFI_STA);          // para o MAC e o SCAN funcionarem mesmo sem config
   if (cfgSsid.isEmpty()) {
     String mac = macTexto();
-    telaTexto("Ola! Sou o Claudinho.", "Configure pelo Claude Code:", mac.c_str());
+    telaTexto("Hi! I am Claudinho.", "Set up through Claude Code:", mac.c_str());
     // espera a configuracao pela serial; avisa a cada 5 s que esta aqui
     unsigned long ultimo = 0;
     while (true) { leSerialConfig(); if (millis() - ultimo > 5000) { ultimo = millis(); imprimeInfo(); } delay(20); }
   }
   if (!conectaWifi()) {
-    char l2[48]; snprintf(l2, sizeof l2, "rede: %s", cfgSsid.c_str());
-    telaTexto("Nao consegui entrar no Wi-Fi", l2, "tentando de novo...");
+    char l2[48]; snprintf(l2, sizeof l2, "network: %s", cfgSsid.c_str());
+    telaTexto("Could not connect to Wi-Fi", l2, "retrying...");
     servidor = SRV_SEM_WIFI;
   }
-  if (cfgToken.length() < 16) registra("aviso: sem token; o PC nao conseguira falar comigo");
+  if (cfgToken.length() < 16) registra("warning: no token; the PC cannot connect");
   iniciaLocal();
   imprimeInfo();
   mudaPagina(0);
@@ -2454,18 +2865,23 @@ void loop() {
   cuidaManutencao();
   if (pagina != 0 && !(manter && pagina == paginaManter) && millis() - paginaDesde > paginaDur) {
     if (pagina == 2) manutPedidaEm = 0;
-    if (pagina == 6) saiVelha("sem toque");
-    else if (pagina == 7) saiGenius("sem toque");
-    else if (pagina >= 3 && pagina <= 5) cancelaPaleta("sem toque");
-    else if (pagina == 8) { if (aN && aFila[0].fixo) abreAlerta(); else toqueAlerta(); }   // so o informativo sai sozinho
+#if !DISPLAY_GC9A01
+    if (pagina == 6) saiVelha("no touch");
+    else if (pagina == 7) saiGenius("no touch");
+    else if (pagina >= 3 && pagina <= 5) cancelaPaleta("no touch");
+    else
+#endif
+    if (pagina == 8) { if (aN && aFila[0].fixo) abreAlerta(); else toqueAlerta(); }   // so o informativo sai sozinho
     else voltaRepouso();
   }
 
   static unsigned long ultimoTick = 0;
   if (millis() - ultimoTick >= 1000) { ultimoTick = millis(); confereRenovacao(); desenha(); }
   cuidaConsumo();
+#if !DISPLAY_GC9A01
   cuidaVelha();
   cuidaGenius();
+#endif
   cuidaBambu();
   cuidaCena();
   cuidaAlertaAnim();
@@ -2478,13 +2894,20 @@ void loop() {
     if (!dormindo) dormeDesde = 0;
     else if (!dormeDesde) dormeDesde = millis();
     int alvo = (dormindo && millis() - dormeDesde > 20000) ? 15 : (brilhoAlto ? 100 : 15);
-    if (alvo != brilhoNaTela) { brilhoNaTela = alvo; nexCmdf("dim=%d", alvo); }
+    if (alvo != brilhoNaTela) {
+      brilhoNaTela = alvo;
+#if !DISPLAY_GC9A01
+      nexCmdf("dim=%d", alvo);
+#endif
+    }
   }
 
+#if !DISPLAY_GC9A01
   // Ajustes do Nextion repetidos de tempos em tempos: se ele acordou depois do
   // boot do ESP (ou foi regravado), perdeu o sendxy e o toque some.
   static unsigned long ultimoAjuste = 0;
   if (millis() - ultimoAjuste >= 30000) { ultimoAjuste = millis(); nexCmd("bkcmd=0"); nexCmd("sendxy=1"); nexCmd("thsp=0"); }
+#endif
   if (pagina == 0) cuidaRosto();
   delay(10);
 }
