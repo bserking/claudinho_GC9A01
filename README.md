@@ -38,3 +38,17 @@ documented in `firmware/hms/README.md`.
 
 Based on [Claudinho by Argeu Thiesen](https://github.com/argeuthiesen/claudinho).
 The original MIT license is in `LICENSE`.
+
+Dashboard:
+<img width="1132" height="900" alt="image" src="https://github.com/user-attachments/assets/b92f2b20-46da-4d30-a67c-b99cddafd903" />
+<img width="1120" height="861" alt="image" src="https://github.com/user-attachments/assets/3135f185-4968-4f11-9c66-6090d2faf3a4" />
+
+
+
+Optional 3D case:
+I use the predesigned case of another Claude companion app: https://makerworld.com/en/models/3124939-clawdio-your-claude-code-companion#profileId-3525778
+Check it out!
+
+<img width="1536" height="2048" alt="IMG_5436" src="https://github.com/user-attachments/assets/bdd0ba57-9c25-4771-b35f-03b52d8f013c" />
+<img width="1536" height="2048" alt="IMG_5435" src="https://github.com/user-attachments/assets/4afa204d-ce91-4f79-95ae-d671ae73c352" />
+
